@@ -23,6 +23,7 @@ VELOX_ENHANCED_BRANCH=ibm-2026_02_06
 VELOX_HOME=""
 RUN_SETUP_SCRIPT=ON
 ENABLE_ENHANCED_FEATURES=OFF
+SKIP_VELOX_CHECKOUT=OFF
 
 # Developer use only for testing Velox PR.
 UPSTREAM_VELOX_PR_ID=""
@@ -51,6 +52,10 @@ for arg in "$@"; do
   --enable_enhanced_features=*)
     ENABLE_ENHANCED_FEATURES=("${arg#*=}")
     VELOX_BRANCH=$VELOX_ENHANCED_BRANCH
+    shift # Remove argument name from processing
+    ;;
+  --skip_checkout=*)
+    SKIP_VELOX_CHECKOUT=("${arg#*=}")
     shift # Remove argument name from processing
     ;;
   *)
@@ -91,6 +96,19 @@ function process_setup_tencentos32 {
 
 function prepare_velox_source_code {
   echo "Preparing Velox source code..."
+
+  if [[ "$SKIP_VELOX_CHECKOUT" == "ON" ]]; then
+    echo "Skipping Velox checkout (--skip_checkout=ON)."
+    echo "Using existing source in $VELOX_HOME as-is."
+    echo "Note: submodule sync/update is also skipped."
+    if [ -d $VELOX_HOME ]; then
+      cd $VELOX_HOME
+    else
+      echo "Error: $VELOX_HOME does not exist, cannot skip checkout."
+      exit 1
+    fi
+    return
+  fi
 
   # checkout code
   TARGET_BUILD_COMMIT="$(git ls-remote $VELOX_REPO $VELOX_BRANCH | awk '{print $1;}' | head -n 1)"

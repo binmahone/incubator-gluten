@@ -46,6 +46,7 @@ VELOX_HOME="$GLUTEN_DIR/ep/build-velox/build/velox_ep"
 VELOX_PARAMETER=""
 BUILD_ARROW=ON
 SPARK_VERSION=ALL
+SKIP_VELOX_CHECKOUT=OFF
 
 # set default number of threads as cpu cores minus 2
 if [[ "$(uname)" == "Darwin" ]]; then
@@ -119,6 +120,10 @@ do
         RUN_SETUP_SCRIPT=("${arg#*=}")
         shift # Remove argument name from processing
         ;;
+        --skip_checkout=*)
+        SKIP_VELOX_CHECKOUT=("${arg#*=}")
+        shift # Remove argument name from processing
+        ;;
         --velox_repo=*)
         VELOX_REPO=("${arg#*=}")
         shift # Remove argument name from processing
@@ -183,6 +188,10 @@ function concat_velox_param {
     fi
 
     VELOX_PARAMETER+="--run_setup_script=$RUN_SETUP_SCRIPT "
+
+    if [ "$SKIP_VELOX_CHECKOUT" = "ON" ]; then
+        VELOX_PARAMETER+="--skip_checkout=$SKIP_VELOX_CHECKOUT "
+    fi
 }
 
 
