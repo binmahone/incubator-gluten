@@ -37,8 +37,9 @@ function process_setup_ubuntu_2204 {
 
 function process_setup_centos_9 {
   cp /lib64/{libre2.so.9,libdouble-conversion.so.3,libevent-2.1.so.7,libdwarf.so.0,libicudata.so.67,libicui18n.so.67,libicuuc.so.67,libsodium.so.23} $THIRDPARTY_LIB/
-  cp /usr/local/lib/{libboost_context.so.1.84.0,libboost_filesystem.so.1.84.0,libboost_program_options.so.1.84.0,libboost_regex.so.1.84.0,libboost_system.so.1.84.0,libboost_thread.so.1.84.0,libboost_atomic.so.1.84.0} $THIRDPARTY_LIB/
-  cp /usr/local/lib64/{libgflags.so.2.2,libglog.so.1} $THIRDPARTY_LIB/
+  cp /usr/local/lib/{libboost_context.so.1.84.0,libboost_filesystem.so.1.84.0,libboost_program_options.so.1.84.0,libboost_regex.so.1.84.0,libboost_system.so.1.84.0,libboost_thread.so.1.84.0,libboost_atomic.so.1.84.0,libfolly.so.0.58.0-dev} $THIRDPARTY_LIB/
+  cp /usr/local/lib64/{libgflags.so.2.2,libglog.so.1,libgeos.so.3.10.7,libcudf.so,librmm.so,librapids_logger.so,libnvcomp.so.5,libkvikio.so} $THIRDPARTY_LIB/
+  cp /root/incubator-gluten/ep/build-velox/build/velox_ep/_build/release/_deps/curl-build/lib/{libcurl.so.4} $THIRDPARTY_LIB/ || echo "WARNING: libcurl.so.4 not found, may need manual copy"
 }
 
 function process_setup_centos_8 {
