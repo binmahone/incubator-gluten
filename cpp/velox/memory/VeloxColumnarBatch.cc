@@ -22,6 +22,10 @@
 #include "velox/type/Type.h"
 #include "velox/vector/FlatVector.h"
 
+#ifdef GLUTEN_ENABLE_GPU
+#include "memory/GpuBufferColumnarBatch.h"
+#endif
+
 namespace gluten {
 
 using namespace facebook;
@@ -98,6 +102,13 @@ std::shared_ptr<VeloxColumnarBatch> VeloxColumnarBatch::from(
   if (cb->getType() == "velox") {
     return std::dynamic_pointer_cast<VeloxColumnarBatch>(cb);
   }
+#ifdef GLUTEN_ENABLE_GPU
+  if (cb->getType() == "gpu") {
+    auto gpuBatch = std::dynamic_pointer_cast<GpuBufferColumnarBatch>(cb);
+    VELOX_CHECK_NOT_NULL(gpuBatch, "Failed to cast ColumnarBatch to GpuBufferColumnarBatch");
+    return std::make_shared<VeloxColumnarBatch>(gpuBatch->toRowVector(pool));
+  }
+#endif
   auto vp = velox::importFromArrowAsOwner(*cb->exportArrowSchema(), *cb->exportArrowArray(), pool);
   return std::make_shared<VeloxColumnarBatch>(std::dynamic_pointer_cast<velox::RowVector>(vp));
 }

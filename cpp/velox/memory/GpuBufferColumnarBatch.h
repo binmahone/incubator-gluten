@@ -64,6 +64,12 @@ class GpuBufferColumnarBatch final : public ColumnarBatch {
   std::shared_ptr<ArrowArray> exportArrowArray() override;
   std::vector<char> toUnsafeRow(int32_t rowId) const override;
 
+  /// Convert the GPU buffer batch to a Velox RowVector on CPU.
+  /// This creates Velox FlatVectors directly from the CPU-side Arrow buffers,
+  /// handling format differences (e.g., boolean byte-to-bit packing,
+  /// timestamp int64 nanos to Velox Timestamp, string lengths to StringView).
+  facebook::velox::RowVectorPtr toRowVector(facebook::velox::memory::MemoryPool* pool) const;
+
  private:
   inline static const std::string kType{"gpu"};
   facebook::velox::RowTypePtr rowType_;

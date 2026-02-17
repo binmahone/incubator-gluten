@@ -18,7 +18,10 @@
 #include "compute/VeloxRuntime.h"
 #include "utils/Timer.h"
 #include "utils/VeloxArrowUtils.h"
+#include "velox/buffer/Buffer.h"
+#include "velox/common/base/BitUtil.h"
 #include "velox/row/UnsafeRowFast.h"
+#include "velox/type/Timestamp.h"
 #include "velox/type/Type.h"
 #include "velox/vector/FlatVector.h"
 
@@ -33,6 +36,29 @@ namespace gluten {
       kLength,
       kValue
     };
+
+    // Releases the shared_ptr preventing the Arrow buffer from being freed
+    // while the Velox BufferView is alive.
+    class ArrowBufferHolder {
+     public:
+      ArrowBufferHolder() = default;
+      explicit ArrowBufferHolder(std::shared_ptr<arrow::Buffer> buf)
+          : buf_(std::move(buf)) {}
+      void addRef() const {}
+      void release() const {}
+     private:
+      std::shared_ptr<arrow::Buffer> buf_;
+    };
+
+    // Zero-copy wrap of an Arrow buffer as a Velox BufferPtr.
+    facebook::velox::BufferPtr wrapArrowBuffer(
+        const std::shared_ptr<arrow::Buffer>& buf) {
+      if (!buf || buf->size() == 0) {
+        return nullptr;
+      }
+      return facebook::velox::BufferView<ArrowBufferHolder>::create(
+          buf->data(), buf->size(), ArrowBufferHolder{buf});
+    }
   }
 
 using namespace facebook;
@@ -179,6 +205,153 @@ std::shared_ptr<GpuBufferColumnarBatch> GpuBufferColumnarBatch::compose(
   }
 
   return std::make_shared<GpuBufferColumnarBatch>(batches[0]->getRowType(), std::move(returnBuffers), numRows);
+}
+
+RowVectorPtr GpuBufferColumnarBatch::toRowVector(memory::MemoryPool* pool) const {
+  std::vector<VectorPtr> children;
+  children.reserve(rowType_->size());
+
+  int32_t bufferIdx = 0;
+  const auto nRows = static_cast<uint32_t>(numRows());
+
+  for (size_t i = 0; i < rowType_->size(); ++i) {
+    const auto& childType = rowType_->childAt(i);
+    const auto kind = childType->kind();
+
+    VectorPtr child;
+    switch (kind) {
+      case TypeKind::BOOLEAN: {
+        // GPU shuffle stores each boolean as a separate byte (0 or 1).
+        // Velox FlatVector<bool> uses bit-packed storage, so convert here.
+        auto nulls = wrapArrowBuffer(buffers_[bufferIdx++]);
+        const auto& valuesBuf = buffers_[bufferIdx++];
+
+        auto bitValues = AlignedBuffer::allocate<bool>(nRows, pool);
+        auto* dst = bitValues->asMutable<uint64_t>();
+        memset(dst, 0, bitValues->size());
+        if (valuesBuf && valuesBuf->size() > 0) {
+          const uint8_t* src = valuesBuf->data();
+          for (uint32_t r = 0; r < nRows; ++r) {
+            if (src[r]) {
+              bits::setBit(dst, r);
+            }
+          }
+        }
+        child = std::make_shared<FlatVector<bool>>(
+            pool, childType, nulls, nRows, std::move(bitValues), std::vector<BufferPtr>{});
+        break;
+      }
+      case TypeKind::TIMESTAMP: {
+        // GPU shuffle stores timestamps as int64_t nanoseconds.
+        // Velox Timestamp is a 128-bit struct {seconds, nanos}.
+        auto nulls = wrapArrowBuffer(buffers_[bufferIdx++]);
+        const auto& valuesBuf = buffers_[bufferIdx++];
+
+        auto tsValues = AlignedBuffer::allocate<Timestamp>(nRows, pool);
+        auto* dstTs = tsValues->asMutable<Timestamp>();
+        const auto* srcNanos = reinterpret_cast<const int64_t*>(valuesBuf->data());
+        for (uint32_t r = 0; r < nRows; ++r) {
+          dstTs[r] = Timestamp::fromNanos(srcNanos[r]);
+        }
+        child = std::make_shared<FlatVector<Timestamp>>(
+            pool, childType, nulls, nRows, std::move(tsValues), std::vector<BufferPtr>{});
+        break;
+      }
+      case TypeKind::HUGEINT: {
+        // int128_t may need 16-byte alignment.
+        auto nulls = wrapArrowBuffer(buffers_[bufferIdx++]);
+        auto values = wrapArrowBuffer(buffers_[bufferIdx++]);
+        if (values) {
+          const auto* addr = values->as<int128_t>();
+          if ((reinterpret_cast<uintptr_t>(addr) & 0xf) != 0) {
+            auto aligned = AlignedBuffer::allocate<char>(values->size(), pool);
+            memcpy(aligned->asMutable<char>(), values->as<char>(), values->size());
+            values = aligned;
+          }
+        }
+        child = std::make_shared<FlatVector<int128_t>>(
+            pool, childType, nulls, nRows, std::move(values), std::vector<BufferPtr>{});
+        break;
+      }
+      case TypeKind::VARCHAR:
+      case TypeKind::VARBINARY: {
+        // Buffer layout: [nulls, lengths (int32 per row), values (char data)].
+        // Convert per-row lengths to Velox StringView array.
+        auto nulls = wrapArrowBuffer(buffers_[bufferIdx++]);
+        const auto& lengthsBuf = buffers_[bufferIdx++];
+        auto valuesBuffer = wrapArrowBuffer(buffers_[bufferIdx++]);
+
+        const auto* rawLengths = reinterpret_cast<const int32_t*>(lengthsBuf->data());
+        const auto* rawValues = valuesBuffer ? valuesBuffer->as<char>() : nullptr;
+
+        auto stringViews = AlignedBuffer::allocate<char>(sizeof(StringView) * nRows, pool);
+        auto* rawSV = stringViews->asMutable<StringView>();
+
+        uint64_t offset = 0;
+        for (uint32_t r = 0; r < nRows; ++r) {
+          rawSV[r] = StringView(rawValues + offset, rawLengths[r]);
+          offset += rawLengths[r];
+        }
+
+        std::vector<BufferPtr> stringBuffers;
+        stringBuffers.emplace_back(valuesBuffer);
+
+        child = std::make_shared<FlatVector<StringView>>(
+            pool, childType, nulls, nRows, std::move(stringViews), std::move(stringBuffers));
+        break;
+      }
+      // All other fixed-width scalar types — zero-copy buffer wrapping.
+      case TypeKind::TINYINT: {
+        auto nulls = wrapArrowBuffer(buffers_[bufferIdx++]);
+        auto values = wrapArrowBuffer(buffers_[bufferIdx++]);
+        child = std::make_shared<FlatVector<int8_t>>(
+            pool, childType, nulls, nRows, std::move(values), std::vector<BufferPtr>{});
+        break;
+      }
+      case TypeKind::SMALLINT: {
+        auto nulls = wrapArrowBuffer(buffers_[bufferIdx++]);
+        auto values = wrapArrowBuffer(buffers_[bufferIdx++]);
+        child = std::make_shared<FlatVector<int16_t>>(
+            pool, childType, nulls, nRows, std::move(values), std::vector<BufferPtr>{});
+        break;
+      }
+      case TypeKind::INTEGER: {
+        auto nulls = wrapArrowBuffer(buffers_[bufferIdx++]);
+        auto values = wrapArrowBuffer(buffers_[bufferIdx++]);
+        child = std::make_shared<FlatVector<int32_t>>(
+            pool, childType, nulls, nRows, std::move(values), std::vector<BufferPtr>{});
+        break;
+      }
+      case TypeKind::BIGINT: {
+        auto nulls = wrapArrowBuffer(buffers_[bufferIdx++]);
+        auto values = wrapArrowBuffer(buffers_[bufferIdx++]);
+        child = std::make_shared<FlatVector<int64_t>>(
+            pool, childType, nulls, nRows, std::move(values), std::vector<BufferPtr>{});
+        break;
+      }
+      case TypeKind::REAL: {
+        auto nulls = wrapArrowBuffer(buffers_[bufferIdx++]);
+        auto values = wrapArrowBuffer(buffers_[bufferIdx++]);
+        child = std::make_shared<FlatVector<float>>(
+            pool, childType, nulls, nRows, std::move(values), std::vector<BufferPtr>{});
+        break;
+      }
+      case TypeKind::DOUBLE: {
+        auto nulls = wrapArrowBuffer(buffers_[bufferIdx++]);
+        auto values = wrapArrowBuffer(buffers_[bufferIdx++]);
+        child = std::make_shared<FlatVector<double>>(
+            pool, childType, nulls, nRows, std::move(values), std::vector<BufferPtr>{});
+        break;
+      }
+      default:
+        VELOX_FAIL(
+            "Unsupported type kind {} in GpuBufferColumnarBatch::toRowVector",
+            TypeKindName::toName(kind));
+    }
+    children.emplace_back(std::move(child));
+  }
+
+  return std::make_shared<RowVector>(pool, rowType_, BufferPtr(nullptr), nRows, children);
 }
 
 } // namespace gluten

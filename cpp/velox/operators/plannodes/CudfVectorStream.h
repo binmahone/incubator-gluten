@@ -19,6 +19,7 @@
 
 #include "CudfVectorStream.h"
 #include "compute/ResultIterator.h"
+#include "memory/GpuBufferColumnarBatch.h"
 #include "memory/VeloxColumnarBatch.h"
 #include "velox/exec/Driver.h"
 #include "velox/exec/Operator.h"
@@ -103,25 +104,62 @@ class CudfVectorStream : public CudfVectorStreamBase {
       const facebook::velox::RowTypePtr& outputType)
       : CudfVectorStreamBase(driverCtx, pool, iterator, outputType) {}
 
-  // Convert arrow batch to row vector and use new output columns
+  // Convert columnar batch to a CudfVector for downstream GPU operators.
+  // Handles three input types:
+  //   1. VeloxColumnarBatch wrapping a CudfVector  -> re-wrap with outputType_
+  //   2. VeloxColumnarBatch wrapping a CPU RowVector (e.g. BroadcastExchange)
+  //      -> return as-is with adjusted type
+  //   3. GpuBufferColumnarBatch (shuffle read) -> toRowVector() then upload to GPU
   facebook::velox::RowVectorPtr next() override {
     auto cb = nextInternal();
     if (cb == nullptr) {
       return nullptr;
     }
-    auto vb = std::dynamic_pointer_cast<VeloxColumnarBatch>(cb);
-    VELOX_CHECK_NOT_NULL(vb);
-    auto vp = vb->getRowVector();
-    VELOX_DCHECK(vp != nullptr);
-    auto cudfVector = std::dynamic_pointer_cast<facebook::velox::cudf_velox::CudfVector>(vp);
-    if (cudfVector == nullptr) {
-      // The vector may comes from BroadcastExchange, in this case, it's not a CudfVector.
-      vp->setType(outputType_);
-      return vp;
+
+    // Cases 1 & 2: VeloxColumnarBatch
+    if (cb->getType() == "velox") {
+      auto vb = std::dynamic_pointer_cast<VeloxColumnarBatch>(cb);
+      VELOX_CHECK_NOT_NULL(vb);
+      auto vp = vb->getRowVector();
+      VELOX_CHECK_NOT_NULL(vp);
+      auto cudfVector = std::dynamic_pointer_cast<facebook::velox::cudf_velox::CudfVector>(vp);
+      if (cudfVector == nullptr) {
+        // Case 2: The vector comes from BroadcastExchange – it's a plain CPU RowVector.
+        vp->setType(outputType_);
+        return vp;
+      }
+      // Case 1: Already a CudfVector – re-wrap with the correct outputType_.
+      return std::make_shared<facebook::velox::cudf_velox::CudfVector>(
+          vp->pool(), outputType_, vp->size(), cudfVector->release(), cudfVector->stream());
     }
-    VELOX_CHECK_NOT_NULL(cudfVector);
-    return std::make_shared<facebook::velox::cudf_velox::CudfVector>(
-        vp->pool(), outputType_, vp->size(), cudfVector->release(), cudfVector->stream());
+
+#ifdef GLUTEN_ENABLE_GPU
+    // Case 3: GpuBufferColumnarBatch from shuffle reader – CPU Arrow buffers
+    // that need to be converted to a Velox RowVector then uploaded to GPU.
+    if (cb->getType() == "gpu") {
+      auto gpuBatch = std::dynamic_pointer_cast<GpuBufferColumnarBatch>(cb);
+      VELOX_CHECK_NOT_NULL(gpuBatch);
+
+      // Convert CPU Arrow buffers to a Velox RowVector on CPU.
+      auto rowVector = gpuBatch->toRowVector(pool_);
+      VELOX_CHECK_NOT_NULL(rowVector);
+
+      // Upload CPU RowVector to GPU as a cudf::table, then wrap as CudfVector.
+      auto stream = facebook::velox::cudf_velox::cudfGlobalStreamPool().get_stream();
+      auto tbl = facebook::velox::cudf_velox::with_arrow::toCudfTable(rowVector, pool_, stream);
+      stream.synchronize();
+      VELOX_CHECK_NOT_NULL(tbl);
+
+      const auto size = tbl->num_rows();
+      return std::make_shared<facebook::velox::cudf_velox::CudfVector>(
+          pool_, outputType_, size, std::move(tbl), stream);
+    }
+#endif
+    VELOX_FAIL(
+        "Unsupported ColumnarBatch type: '{}', numColumns: {}, numRows: {}",
+        cb->getType(),
+        cb->numColumns(),
+        cb->numRows());
   }
 };
 
