@@ -31,7 +31,7 @@ class GlutenBufferedInputBuilder : public facebook::velox::connector::hive::Buff
       const facebook::velox::dwio::common::ReaderOptions& readerOpts,
       const facebook::velox::connector::ConnectorQueryCtx* connectorQueryCtx,
       std::shared_ptr<facebook::velox::io::IoStatistics> ioStats,
-      std::shared_ptr<facebook::velox::filesystems::File::IoStats> fsStats,
+      std::shared_ptr<facebook::velox::IoStats> fsStats,
       folly::Executor* executor,
       const folly::F14FastMap<std::string, std::string>& fileReadOps = {}) override {
     if (connectorQueryCtx->cache()) {
