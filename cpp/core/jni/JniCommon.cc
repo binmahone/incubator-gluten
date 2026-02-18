@@ -37,9 +37,30 @@ jmethodID gluten::JniCommonState::runtimeAwareCtxHandle() {
   return runtimeAwareCtxHandle_;
 }
 
+jclass gluten::JniCommonState::reservationListenerClass() {
+  assertInitialized();
+  return reservationListenerClass_;
+}
+
+jmethodID gluten::JniCommonState::reserveMemoryMethod() {
+  assertInitialized();
+  return reserveMemoryMethod_;
+}
+
+jmethodID gluten::JniCommonState::unreserveMemoryMethod() {
+  assertInitialized();
+  return unreserveMemoryMethod_;
+}
+
 void gluten::JniCommonState::initialize(JNIEnv* env) {
   runtimeAwareClass_ = createGlobalClassReference(env, "Lorg/apache/gluten/runtime/RuntimeAware;");
   runtimeAwareCtxHandle_ = getMethodIdOrError(env, runtimeAwareClass_, "rtHandle", "()J");
+
+  reservationListenerClass_ = createGlobalClassReferenceOrError(
+      env, "Lorg/apache/gluten/memory/listener/ReservationListener;");
+  reserveMemoryMethod_ = getMethodIdOrError(env, reservationListenerClass_, "reserve", "(J)J");
+  unreserveMemoryMethod_ = getMethodIdOrError(env, reservationListenerClass_, "unreserve", "(J)J");
+
   JavaVM* vm;
   if (env->GetJavaVM(&vm) != JNI_OK) {
     throw gluten::GlutenException("Unable to get JavaVM instance");
@@ -55,6 +76,7 @@ void gluten::JniCommonState::close() {
   JNIEnv* env = nullptr;
   attachCurrentThreadAsDaemonOrThrow(vm_, &env);
   env->DeleteGlobalRef(runtimeAwareClass_);
+  env->DeleteGlobalRef(reservationListenerClass_);
   closed_ = true;
 }
 

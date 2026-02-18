@@ -78,7 +78,20 @@ static inline void checkException(JNIEnv* env) {
 }
 
 static inline jclass createGlobalClassReference(JNIEnv* env, const char* className) {
-  jclass localClass = env->FindClass(className);
+  std::string normalizedClassName(className);
+  // Accept both binary names (org/apache/Foo) and descriptor names (Lorg/apache/Foo;).
+  if (
+      normalizedClassName.size() > 2 && normalizedClassName.front() == 'L' &&
+      normalizedClassName.back() == ';') {
+    normalizedClassName = normalizedClassName.substr(1, normalizedClassName.size() - 2);
+  }
+  jclass localClass = env->FindClass(normalizedClassName.c_str());
+  if (localClass == nullptr) {
+    // Clear pending Java exception (e.g. NoClassDefFoundError) so callers
+    // can safely invoke further JNI functions.
+    env->ExceptionClear();
+    return nullptr;
+  }
   jclass globalClass = (jclass)env->NewGlobalRef(localClass);
   env->DeleteLocalRef(localClass);
   return globalClass;
@@ -159,11 +172,19 @@ class JniCommonState {
 
   jmethodID runtimeAwareCtxHandle();
 
+  jclass reservationListenerClass();
+  jmethodID reserveMemoryMethod();
+  jmethodID unreserveMemoryMethod();
+
  private:
   void initialize(JNIEnv* env);
 
   jclass runtimeAwareClass_;
   jmethodID runtimeAwareCtxHandle_;
+
+  jclass reservationListenerClass_;
+  jmethodID reserveMemoryMethod_;
+  jmethodID unreserveMemoryMethod_;
 
   JavaVM* vm_;
   bool initialized_{false};
@@ -400,10 +421,10 @@ class SparkAllocationListener final : public gluten::AllocationListener {
     JNIEnv* env;
     attachCurrentThreadAsDaemonOrThrow(vm_, &env);
     if (size < 0) {
-      env->CallLongMethod(jListenerGlobalRef_, unreserveMemoryMethod(env), -size);
+      env->CallLongMethod(jListenerGlobalRef_, gluten::getJniCommonState()->unreserveMemoryMethod(), -size);
       checkException(env);
     } else {
-      env->CallLongMethod(jListenerGlobalRef_, reserveMemoryMethod(env), size);
+      env->CallLongMethod(jListenerGlobalRef_, gluten::getJniCommonState()->reserveMemoryMethod(), size);
       checkException(env);
     }
     usedBytes_ += size;
@@ -429,26 +450,6 @@ class SparkAllocationListener final : public gluten::AllocationListener {
   }
 
  private:
-  jclass javaReservationListenerClass(JNIEnv* env) {
-    static jclass javaReservationListenerClass = createGlobalClassReference(
-        env,
-        "Lorg/apache/gluten/memory/listener/"
-        "ReservationListener;");
-    return javaReservationListenerClass;
-  }
-
-  jmethodID reserveMemoryMethod(JNIEnv* env) {
-    static jmethodID reserveMemoryMethod =
-        getMethodIdOrError(env, javaReservationListenerClass(env), "reserve", "(J)J");
-    return reserveMemoryMethod;
-  }
-
-  jmethodID unreserveMemoryMethod(JNIEnv* env) {
-    static jmethodID unreserveMemoryMethod =
-        getMethodIdOrError(env, javaReservationListenerClass(env), "unreserve", "(J)J");
-    return unreserveMemoryMethod;
-  }
-
   JavaVM* vm_;
   jobject jListenerGlobalRef_;
   std::atomic_int64_t usedBytes_{0L};
