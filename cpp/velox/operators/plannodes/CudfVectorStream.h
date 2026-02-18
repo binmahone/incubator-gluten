@@ -108,7 +108,7 @@ class CudfVectorStream : public CudfVectorStreamBase {
   // Handles three input types:
   //   1. VeloxColumnarBatch wrapping a CudfVector  -> re-wrap with outputType_
   //   2. VeloxColumnarBatch wrapping a CPU RowVector (e.g. BroadcastExchange)
-  //      -> return as-is with adjusted type
+  //      -> upload to GPU via toCudfTable
   //   3. GpuBufferColumnarBatch (shuffle read) -> toRowVector() then upload to GPU
   facebook::velox::RowVectorPtr next() override {
     auto cb = nextInternal();
@@ -124,9 +124,16 @@ class CudfVectorStream : public CudfVectorStreamBase {
       VELOX_CHECK_NOT_NULL(vp);
       auto cudfVector = std::dynamic_pointer_cast<facebook::velox::cudf_velox::CudfVector>(vp);
       if (cudfVector == nullptr) {
-        // Case 2: The vector comes from BroadcastExchange – it's a plain CPU RowVector.
-        vp->setType(outputType_);
-        return vp;
+        // Case 2: The vector comes from BroadcastExchange – it's a plain CPU
+        // RowVector. Upload to GPU so downstream CudfOperators get a CudfVector
+        // (this source is marked producesGpuOutput via CudfOperator).
+        auto stream = facebook::velox::cudf_velox::cudfGlobalStreamPool().get_stream();
+        auto tbl = facebook::velox::cudf_velox::with_arrow::toCudfTable(vp, pool_, stream);
+        stream.synchronize();
+        VELOX_CHECK_NOT_NULL(tbl);
+        const auto size = tbl->num_rows();
+        return std::make_shared<facebook::velox::cudf_velox::CudfVector>(
+            pool_, outputType_, size, std::move(tbl), stream);
       }
       // Case 1: Already a CudfVector – re-wrap with the correct outputType_.
       return std::make_shared<facebook::velox::cudf_velox::CudfVector>(
