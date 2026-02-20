@@ -31,4 +31,18 @@ void lockGpu();
  */
 void unlockGpu();
 
+/// RAII wrapper that acquires the GPU lock on construction and releases it on
+/// destruction, ensuring exception-safe lock management.
+class GpuLockGuard {
+ public:
+  GpuLockGuard() {
+    lockGpu();
+  }
+  ~GpuLockGuard() {
+    unlockGpu();
+  }
+  GpuLockGuard(const GpuLockGuard&) = delete;
+  GpuLockGuard& operator=(const GpuLockGuard&) = delete;
+};
+
 } // namespace gluten
