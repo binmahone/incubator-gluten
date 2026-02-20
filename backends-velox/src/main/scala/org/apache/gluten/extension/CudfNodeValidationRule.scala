@@ -53,31 +53,28 @@ case class CudfNodeValidationRule(glutenConf: GlutenConfig) extends Rule[SparkPl
 }
 
 object CudfNodeValidationRule {
+  private def setTagForStage(transformer: WholeStageTransformer, isCudf: Boolean): Unit = {
+    transformer.foreach {
+      case t: TransformSupport =>
+        t.setTagValue(CudfTag.CudfTag, isCudf)
+      case _ =>
+    }
+    transformer.setTagValue(CudfTag.CudfTag, isCudf)
+  }
+
   def setTagForWholeStageTransformer(transformer: WholeStageTransformer): Unit = {
-    if (!VeloxConfig.get.cudfEnableTableScan) {
-      // Spark3.2 does not have exists
-      val hasLeaf = transformer.find {
-        case _: LeafTransformSupport => true
-        case _ => false
-      }.isDefined
-      if (!hasLeaf && VeloxConfig.get.cudfEnableValidation) {
-        if (
-          VeloxCudfPlanValidatorJniWrapper.validate(
-            transformer.substraitPlan.toProtobuf.toByteArray)
-        ) {
-          transformer.foreach {
-            case _: LeafTransformSupport =>
-            case t: TransformSupport =>
-              t.setTagValue(CudfTag.CudfTag, true)
-            case _ =>
-          }
-          transformer.setTagValue(CudfTag.CudfTag, true)
-        }
-      } else {
-        transformer.setTagValue(CudfTag.CudfTag, !hasLeaf)
+    if (VeloxConfig.get.cudfEnableValidation && !VeloxConfig.get.cudfEnableTableScan) {
+      // Validate whether the non-scan operators in this stage can run on cudf.
+      // When cudfEnableTableScan is false the scan stays on CPU (Velox) and the
+      // ToCudf plan compiler inserts a CudfFromVelox boundary after the
+      // TableScan, so subsequent operators still get cudf overrides.
+      if (
+        VeloxCudfPlanValidatorJniWrapper.validate(transformer.substraitPlan.toProtobuf.toByteArray)
+      ) {
+        setTagForStage(transformer, isCudf = true)
       }
     } else {
-      transformer.setTagValue(CudfTag.CudfTag, true)
+      setTagForStage(transformer, isCudf = true)
     }
   }
 
