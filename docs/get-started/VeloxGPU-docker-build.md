@@ -13,6 +13,31 @@ parent: Getting-Started
 
 ---
 
+## TL;DR
+
+Everything is driven by one script from the **gluten repo root**:
+
+```bash
+# First-time full build (interactive CUDA arch prompt)
+bash dev/docker-build-cudf.sh
+
+# Full build with explicit CUDA arch (non-interactive)
+bash dev/docker-build-cudf.sh --cuda_arch=90
+
+# Incremental rebuild after a code change (skip Arrow, clear cmake cache)
+bash dev/docker-build-cudf.sh --rebuild
+
+# Build for Ubuntu instead of the default CentOS 9
+bash dev/docker-build-cudf.sh --system=ubuntu2204
+
+# See all options
+bash dev/docker-build-cudf.sh --help
+```
+
+The script takes care of everything: container lifecycle, GPU verification, cmake cache management, bundle build, and 3rd-party JARs. Logs land in `build.log` and `thirdparty.log` at the gluten root.
+
+---
+
 ## Part 1: Build Guide
 
 ### Prerequisites (host machine)
@@ -26,64 +51,72 @@ parent: Getting-Started
   └── velox/    (branch: alfxu_dev)
   ```
 
-### Build
-
-Run the build script from the **gluten repo root**:
+### Running the build
 
 ```bash
 bash dev/docker-build-cudf.sh
 ```
 
-The script handles all steps automatically:
-1. Starts (or reuses) the Docker container with GPU access and both repos bind-mounted
-2. Verifies `nvidia-smi` is working inside the container
-3. Runs `buildbundle-veloxbe.sh` (Arrow + Velox + Gluten C++ + Maven)
-4. Runs `build-thirdparty.sh` (3rd-party JARs)
+On the first run, the script will prompt you to select a CUDA target architecture (it auto-detects the local GPU as a hint). Pass `--cuda_arch=` to skip the prompt:
 
-Logs are written to `build.log` and `thirdparty.log` in the gluten root. Monitor from the host:
+```bash
+bash dev/docker-build-cudf.sh --cuda_arch=native      # local GPU only
+bash dev/docker-build-cudf.sh --cuda_arch=all-major   # sm_70,75,80,86,89,90
+bash dev/docker-build-cudf.sh --cuda_arch=90          # pin to a specific SM
+```
+
+Monitor progress in a separate terminal:
 
 ```bash
 tail -f build.log
 ```
 
-**Key options:**
+### What the script does (5 steps)
+
+| Step | Action |
+|------|--------|
+| 1 | Start (or reuse/restart) the Docker container with `--gpus all` and both repos bind-mounted |
+| 2 | Verify GPU access via `nvidia-smi` inside the container |
+| 3 | On `--rebuild`: clear `/opt/velox/_build/release/CMakeCache.txt`; otherwise no-op |
+| 4 | Run `buildbundle-veloxbe.sh` — Arrow → cuDF → Velox → Gluten C++ → Maven JAR |
+| 5 | Run `build-thirdparty.sh` — 3rd-party JARs |
+
+**Build stage durations (step 4):**
+
+| Stage | Time |
+|-------|------|
+| Arrow C++ + Java JNI | ~20–30 min |
+| cuDF 26.04 from source (`fc213fc1`) | ~60–90 min |
+| Velox (`VELOX_ENABLE_CUDF=ON`) | ~30–60 min |
+| Gluten C++ | ~10 min |
+| Maven JAR | ~5 min |
+
+### All options
 
 | Option | Default | Description |
 |--------|---------|-------------|
 | `--system=` | `centos9` | Target OS image (`centos9` or `ubuntu2204`) |
 | `--spark_version=` | `3.5` | Spark version (`3.3`, `3.4`, `3.5`, `4.0`, `4.1`, `ALL`) |
-| `--cuda_arch=` | interactive | CUDA arch: `native`, `all-major`, or a specific SM number (e.g. `90`) |
-| `--rebuild` | off | Incremental rebuild: skip Arrow, clear cmake cache, re-run velox + C++ + Maven |
+| `--cuda_arch=` | interactive | `native`, `all-major`, or SM number (e.g. `90`) |
+| `--rebuild` | off | Skip Arrow, clear cmake cache, re-run velox + C++ + Maven |
 | `--container=` | `gluten_cudf_build` | Docker container name |
 | `--image=` | derived from `--system` | Override the Docker image explicitly |
 | `--velox_repo=` | NVIDIA internal fork | Velox git URL (used only if velox dir is absent) |
 | `--velox_branch=` | `alfxu_dev` | Velox branch to clone |
 
-**Build stages (inside the container):**
-
-1. **Arrow C++ + Java JNI** (~20–30 min) — downloads apache-arrow 15.0.0, applies Gluten patches, builds
-2. **cuDF 26.04 from source** (~60–90 min) — `FetchContent` downloads commit `fc213fc1`, builds `libcudf.so` with CUDA
-3. **Velox** (~30–60 min) — `make release` in `/opt/velox` with `VELOX_ENABLE_CUDF=ON`
-4. **Gluten C++** (~10 min) — cmake + make in `gluten/cpp/`
-5. **Maven JAR** (~5 min) — `mvn install -Pbackends-velox -Pspark-3.5 -DskipTests`
-
-### Output artifacts
-
-After a successful build, the Gluten JAR is at:
+### Output
 
 ```
 gluten/package/target/gluten-velox-bundle-spark3.5_2.12-linux_amd64-1.6.0-SNAPSHOT.jar
 ```
 
-The native shared library (`libgluten.so`) is bundled inside the JAR.
+`libgluten.so` (with `libvelox.so` and `libcudf.so`) is bundled inside the JAR.
 
 ---
 
 ## Part 2: Running with Spark
 
 ### Spark configuration
-
-Enable Gluten by adding the JAR and plugin config to your Spark session:
 
 ```bash
 export GLUTEN_JAR=<path-to-gluten>/package/target/gluten-velox-bundle-spark3.5_2.12-linux_amd64-1.6.0-SNAPSHOT.jar
@@ -100,15 +133,15 @@ spark-shell \
 
 ### Enable GPU (cuDF) acceleration
 
-Add these confs on top of the base Gluten config:
+Add on top of the base config:
 
 ```bash
   --conf spark.gluten.sql.columnar.cudf=true \
   --conf spark.gluten.debug.enabled.cudf=true   # optional: logs which ops go to GPU
 ```
 
-> **Note:** When `spark.gluten.sql.columnar.cudf=true`, Velox PlanNodes are converted to GPU
-> operators. Unsupported operators fall back to CPU automatically.
+> When `spark.gluten.sql.columnar.cudf=true`, Velox PlanNodes are converted to GPU operators.
+> Unsupported operators fall back to CPU automatically.
 
 ### GPU operator support status
 
@@ -124,8 +157,6 @@ Add these confs on top of the base Gluten config:
 
 ### Running tests inside the container
 
-The container has Java 8 and Maven pre-installed. To run a quick Spark test:
-
 ```bash
 docker exec -it gluten_cudf_build bash
 # inside container:
@@ -139,8 +170,6 @@ cd /opt/gluten
 ## Part 3: Debugging — cuDF Version Mismatch
 
 ### Error
-
-Build fails at a velox compile step with:
 
 ```
 /opt/velox/velox/experimental/cudf/exec/CudfHashAggregation.cpp:35:
@@ -165,33 +194,78 @@ The Docker image has a **partial RAPIDS upgrade** — rmm was updated to 26.04 b
 
 `cudf::approx_distinct_count` (header + compiled symbols) was added in 26.04 and is entirely absent from 26.02.
 
-### Fix
+### Fix (commit `5afbccb`)
 
-In `ep/build-velox/src/build-velox.sh`, add `-Dcudf_SOURCE=BUNDLED` to the GPU cmake options:
+Three files are patched together in commit `5afbccb46ee5dec8fb2e53a28265f4857f1c9dd1`:
+
+**1. `ep/build-velox/src/build-velox.sh` — force cudf 26.04 from source + dynamic CUDA arch**
 
 ```diff
-  if [ $ENABLE_GPU == "ON" ]; then
-      echo "enable GPU support."
-      COMPILE_OPTION="$COMPILE_OPTION -DVELOX_ENABLE_GPU=ON -DVELOX_ENABLE_CUDF=ON -DCMAKE_CUDA_ARCHITECTURES=75 \
--         -DCMAKE_CUDA_COMPILER=/usr/local/cuda/bin/nvcc"
-+         -DCMAKE_CUDA_COMPILER=/usr/local/cuda/bin/nvcc -Dcudf_SOURCE=BUNDLED"
-  fi
++CUDA_ARCH="native"
+ ...
++  --cuda_arch=*)
++    CUDA_ARCH=("${arg#*=}")
+ ...
+   if [ $ENABLE_GPU == "ON" ]; then
+-    COMPILE_OPTION="$COMPILE_OPTION -DVELOX_ENABLE_GPU=ON -DVELOX_ENABLE_CUDF=ON -DCMAKE_CUDA_ARCHITECTURES=75 \
+-        -DCMAKE_CUDA_COMPILER=/usr/local/cuda/bin/nvcc"
++    COMPILE_OPTION="$COMPILE_OPTION -DVELOX_ENABLE_GPU=ON -DVELOX_ENABLE_CUDF=ON -DCMAKE_CUDA_ARCHITECTURES=${CUDA_ARCH} \
++        -DCMAKE_CUDA_COMPILER=/usr/local/cuda/bin/nvcc -Dcudf_SOURCE=BUNDLED"
+   fi
 ```
 
-This forces `FetchContent_MakeAvailable(cudf)` to download and build cudf 26.04 from source instead of picking up the stale system cudf 26.02.
+- `-Dcudf_SOURCE=BUNDLED` overrides cmake's `AUTO` resolution and forces `FetchContent` to download and build cudf 26.04 from source, bypassing the stale system cudf 26.02.
+- `-DCMAKE_CUDA_ARCHITECTURES=75` was hardcoded (sm_75 = Turing); it is now `${CUDA_ARCH}` and driven by `--cuda_arch=` passed from `docker-build-cudf.sh`.
 
-After applying the fix, use the `--rebuild` flag to resume without re-running Arrow:
+**2. `dev/builddeps-veloxbe.sh` — thread `--cuda_arch` through + guard velox clone**
+
+```diff
++CUDA_ARCH="native"
+ ...
++        --cuda_arch=*)
++        CUDA_ARCH=("${arg#*=}")
+ ...
+-  ./build-velox.sh ... --enable_gpu=$ENABLE_GPU --build_test_utils=$BUILD_TESTS \
++  ./build-velox.sh ... --enable_gpu=$ENABLE_GPU --cuda_arch=$CUDA_ARCH --build_test_utils=$BUILD_TESTS \
+ ...
+-    get_velox
++    if [ ! -d "$VELOX_HOME" ]; then
++      get_velox
++    else
++      echo "VELOX_HOME=$VELOX_HOME already exists, skipping Velox checkout."
++    fi
+```
+
+- Threads `--cuda_arch` all the way from `docker-build-cudf.sh` → `buildbundle-veloxbe.sh` → `builddeps-veloxbe.sh` → `build-velox.sh`.
+- Guards `get_velox` so a mounted local velox dir (e.g. `/opt/velox`) is never overwritten by a fresh clone.
+
+**3. `ep/build-velox/src/get-velox.sh` — switch default repo from IBM fork to upstream**
+
+```diff
+-VELOX_REPO=https://github.com/IBM/velox.git
+-VELOX_BRANCH=dft-2026_02_06
+-VELOX_ENHANCED_BRANCH=ibm-2026_02_06
++VELOX_REPO=https://github.com/facebookincubator/velox.git
++VELOX_BRANCH=main
++VELOX_ENHANCED_BRANCH=main
+```
+
+Restores the upstream Facebook velox as the default clone target. This only matters when `VELOX_HOME` does not already exist; since `docker-build-cudf.sh` always mounts the local velox dir, this path is normally skipped.
+
+---
+
+After applying all three patches, resume with:
 
 ```bash
 bash dev/docker-build-cudf.sh --rebuild
 ```
 
-`--rebuild` automatically clears the stale CMakeCache and re-runs only the velox + Gluten C++ + Maven steps.
+`--rebuild` clears the stale `CMakeCache.txt` and re-runs only velox + Gluten C++ + Maven — no need to redo the ~30 min Arrow build.
 
 ---
 
 ## Notes
 
-- The `ep/build-velox/src/build-velox.sh` change (`-Dcudf_SOURCE=BUNDLED`) should be committed to `test_build` so future GPU builds against velox 26.04+ don't hit the same issue. It can be removed once the Docker image is rebuilt with cudf 26.04 pre-installed.
+- The `-Dcudf_SOURCE=BUNDLED` change should be committed to `test_build`. It can be dropped once the Docker image ships cudf 26.04 pre-installed.
 - ccache is available in the container (`/usr/bin/ccache`) and speeds up incremental rebuilds significantly.
-- Build logs are written to `gluten/build.log` (overwritten on full builds, appended with `--rebuild`).
+- `build.log` is overwritten on full builds and appended on `--rebuild` runs.
