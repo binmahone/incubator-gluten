@@ -38,6 +38,7 @@ ENABLE_HDFS=OFF
 ENABLE_ABFS=OFF
 ENABLE_VCPKG=OFF
 ENABLE_GPU=OFF
+CUDA_ARCH="native"
 ENABLE_ENHANCED_FEATURES=OFF
 RUN_SETUP_SCRIPT=ON
 VELOX_REPO=""
@@ -109,6 +110,10 @@ do
         ;;
         --enable_gpu=*)
         ENABLE_GPU=("${arg#*=}")
+        shift # Remove argument name from processing
+        ;;
+        --cuda_arch=*)
+        CUDA_ARCH=("${arg#*=}")
         shift # Remove argument name from processing
         ;;
         --enable_enhanced_features=*)
@@ -226,7 +231,7 @@ function build_velox {
   cd $GLUTEN_DIR/ep/build-velox/src
   # When BUILD_TESTS is on for gluten cpp, we need turn on VELOX_BUILD_TEST_UTILS via build_test_utils.
   ./build-velox.sh --enable_s3=$ENABLE_S3 --enable_gcs=$ENABLE_GCS --build_type=$BUILD_TYPE --enable_hdfs=$ENABLE_HDFS \
-                   --enable_abfs=$ENABLE_ABFS --enable_gpu=$ENABLE_GPU --build_test_utils=$BUILD_TESTS \
+                   --enable_abfs=$ENABLE_ABFS --enable_gpu=$ENABLE_GPU --cuda_arch=$CUDA_ARCH --build_test_utils=$BUILD_TESTS \
                    --build_tests=$BUILD_VELOX_TESTS --build_benchmarks=$BUILD_VELOX_BENCHMARKS --num_threads=$NUM_THREADS \
                    --velox_home=$VELOX_HOME
 }
@@ -317,7 +322,11 @@ ARCH=`uname -m`
 commands_to_run=(${OTHER_ARGUMENTS[@]:-})
 (
   if [[ ${#commands_to_run[@]} -eq 0 ]]; then
-    get_velox
+    if [ ! -d "$VELOX_HOME" ]; then
+      get_velox
+    else
+      echo "VELOX_HOME=$VELOX_HOME already exists, skipping Velox checkout."
+    fi
     if [ -z "${GLUTEN_VCPKG_ENABLED:-}" ] && [ $RUN_SETUP_SCRIPT == "ON" ]; then
       setup_dependencies
     fi

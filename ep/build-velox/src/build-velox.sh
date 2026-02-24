@@ -28,6 +28,9 @@ ENABLE_HDFS=OFF
 ENABLE_ABFS=OFF
 # Enable GPU support
 ENABLE_GPU=OFF
+# CUDA architectures: "native" (auto-detect local GPU), "all-major", or specific
+# compute capabilities e.g. "75", "86", "89;90". Defaults to native.
+CUDA_ARCH="native"
 # CMake build type for Velox.
 BUILD_TYPE=release
 # May be deprecated in Gluten build.
@@ -90,6 +93,10 @@ for arg in "$@"; do
     NUM_THREADS=("${arg#*=}")
     shift # Remove argument name from processing
     ;;
+  --cuda_arch=*)
+    CUDA_ARCH=("${arg#*=}")
+    shift # Remove argument name from processing
+    ;;
   *)
     OTHER_ARGUMENTS+=("$1")
     shift # Remove generic argument from processing
@@ -134,8 +141,8 @@ function compile {
   if [ $ENABLE_GPU == "ON" ]; then
     # the cuda default options are for Centos9 image from Meta
     echo "enable GPU support."
-    COMPILE_OPTION="$COMPILE_OPTION -DVELOX_ENABLE_GPU=ON -DVELOX_ENABLE_CUDF=ON -DCMAKE_CUDA_ARCHITECTURES=75 \
-        -DCMAKE_CUDA_COMPILER=/usr/local/cuda/bin/nvcc"
+    COMPILE_OPTION="$COMPILE_OPTION -DVELOX_ENABLE_GPU=ON -DVELOX_ENABLE_CUDF=ON -DCMAKE_CUDA_ARCHITECTURES=${CUDA_ARCH} \
+        -DCMAKE_CUDA_COMPILER=/usr/local/cuda/bin/nvcc -Dcudf_SOURCE=BUNDLED"
   fi
   if [ -n "${GLUTEN_VCPKG_ENABLED:-}" ]; then
     COMPILE_OPTION="$COMPILE_OPTION -DVELOX_GFLAGS_TYPE=static"
