@@ -184,24 +184,32 @@ final private class GpuSemaphoreImpl(
       taskAttemptId,
       _ => {
         val info = new TaskSemaphoreInfo(stageId, taskAttemptId, stageEstimate)
-        logDebug(s"Registering task $taskAttemptId (stage $stageId) with GPU semaphore")
+        logInfo(
+          s"GpuSemaphore: task $taskAttemptId (stage $stageId) requesting acquire, " +
+            s"active=${semaphore.activeTaskCount}, waiting=${semaphore.waitingCount}")
         info
       }
     )
     taskInfo.blockUntilReady(semaphore)
     stageEstimate.addTaskIfNeeded(taskAttemptId)
+    logInfo(
+      s"GpuSemaphore: task $taskAttemptId (stage $stageId) acquired " +
+        s"${taskInfo.getPermitsUsed} permits, active=${semaphore.activeTaskCount}")
   }
 
   def releaseIfNecessary(context: TaskContext): Unit = {
     val taskAttemptId = context.taskAttemptId()
     val taskInfo = tasks.remove(taskAttemptId)
     if (taskInfo != null) {
+      val permits = taskInfo.getPermitsUsed
       taskInfo.releaseSemaphore(semaphore)
       val estimator = stageEstimators.get(taskInfo.stageId)
       if (estimator != null) {
         estimator.taskDone(taskAttemptId)
       }
-      logDebug(s"Released GPU semaphore for task $taskAttemptId (stage ${taskInfo.stageId})")
+      logInfo(
+        s"GpuSemaphore: task $taskAttemptId (stage ${taskInfo.stageId}) released " +
+          s"$permits permits, active=${semaphore.activeTaskCount}")
     }
   }
 
@@ -246,6 +254,8 @@ final private class TaskSemaphoreInfo(
       hasSemaphore = false
     }
   }
+
+  def getPermitsUsed: Long = permitsUsed
 }
 
 /**

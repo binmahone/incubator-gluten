@@ -17,7 +17,6 @@
 
 #include "GpuMemoryTracker.h"
 
-#include <rmm/mr/per_device_resource.hpp>
 #include <glog/logging.h>
 
 #include <algorithm>
@@ -81,7 +80,7 @@ void GpuMemoryTracker::initialize() {
     return;
   }
   instance_ = std::make_unique<GpuMemoryTracker>(originalResource_);
-  rmm::mr::set_current_device_resource(instance_.get());
+  cudf::set_current_device_resource(instance_.get());
   LOG(INFO) << "GpuMemoryTracker initialized, wrapping upstream resource";
 }
 
@@ -90,17 +89,14 @@ void GpuMemoryTracker::shutdown() {
     return;
   }
   if (originalResource_) {
-    rmm::mr::set_current_device_resource(originalResource_);
+    cudf::set_current_device_resource(originalResource_);
   }
   instance_.reset();
   originalResource_ = nullptr;
   LOG(INFO) << "GpuMemoryTracker shut down";
 }
 
-void* GpuMemoryTracker::do_allocate(
-    std::size_t bytes,
-    rmm::cuda_stream_view stream) {
-  void* ptr = upstream_->allocate(stream, bytes);
+void GpuMemoryTracker::trackAlloc(std::size_t bytes) {
   if (hasTask_) {
     int64_t signedBytes = static_cast<int64_t>(bytes);
     totalAllocated_.fetch_add(signedBytes, std::memory_order_relaxed);
@@ -109,14 +105,9 @@ void* GpuMemoryTracker::do_allocate(
     info.currentBytes += signedBytes;
     info.peakBytes = std::max(info.peakBytes, info.currentBytes);
   }
-  return ptr;
 }
 
-void GpuMemoryTracker::do_deallocate(
-    void* ptr,
-    std::size_t bytes,
-    rmm::cuda_stream_view stream) noexcept {
-  upstream_->deallocate(stream, ptr, bytes);
+void GpuMemoryTracker::trackDealloc(std::size_t bytes) {
   if (hasTask_) {
     int64_t signedBytes = static_cast<int64_t>(bytes);
     totalAllocated_.fetch_sub(signedBytes, std::memory_order_relaxed);
@@ -128,8 +119,24 @@ void GpuMemoryTracker::do_deallocate(
   }
 }
 
+void* GpuMemoryTracker::do_allocate(
+    std::size_t bytes,
+    rmm::cuda_stream_view stream) {
+  void* ptr = upstream_->allocate(stream, bytes);
+  trackAlloc(bytes);
+  return ptr;
+}
+
+void GpuMemoryTracker::do_deallocate(
+    void* ptr,
+    std::size_t bytes,
+    rmm::cuda_stream_view stream) noexcept {
+  upstream_->deallocate(stream, ptr, bytes);
+  trackDealloc(bytes);
+}
+
 bool GpuMemoryTracker::do_is_equal(
-    device_memory_resource const& other) const noexcept {
+    rmm::mr::device_memory_resource const& other) const noexcept {
   if (auto* o = dynamic_cast<const GpuMemoryTracker*>(&other)) {
     return upstream_->is_equal(*o->upstream_);
   }

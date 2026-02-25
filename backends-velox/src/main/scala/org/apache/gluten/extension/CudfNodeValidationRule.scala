@@ -24,6 +24,7 @@ import org.apache.gluten.extension.CudfNodeValidationRule.{createGPUColumnarExch
 
 import org.apache.spark.sql.catalyst.rules.Rule
 import org.apache.spark.sql.execution.{ColumnarShuffleExchangeExec, GPUColumnarShuffleExchangeExec, SparkPlan}
+import org.apache.spark.sql.internal.SQLConf
 
 // Add the node name prefix 'Cudf' to GlutenPlan when can offload to cudf
 case class CudfNodeValidationRule(glutenConf: GlutenConfig) extends Rule[SparkPlan] {
@@ -89,6 +90,11 @@ object CudfNodeValidationRule {
     if (!res.ok()) {
       throw new GlutenNotSupportException(res.reason())
     }
-    exec
+    if (!SQLConf.get.adaptiveExecutionEnabled) {
+      val batchSize = VeloxConfig.get.cudfBatchSize
+      GpuResizeBufferColumnarBatchExec(exec, batchSize)
+    } else {
+      exec
+    }
   }
 }

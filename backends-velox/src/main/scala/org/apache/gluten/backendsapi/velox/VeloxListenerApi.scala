@@ -134,9 +134,21 @@ class VeloxListenerApi extends ListenerApi with Logging {
     SparkDirectoryUtil.init(conf)
     initialize(conf, isDriver = true)
     UdfJniWrapper.registerFunctionSignatures()
+
+    if (inLocalMode(conf)) {
+      initializeGpuSemaphore(conf)
+    }
   }
 
-  override def onDriverShutdown(): Unit = shutdown()
+  override def onDriverShutdown(): Unit = {
+    GpuSemaphore.shutdown()
+    try {
+      GpuMemoryTrackerJniWrapper.shutdown()
+    } catch {
+      case _: UnsatisfiedLinkError =>
+    }
+    shutdown()
+  }
 
   override def onExecutorStart(pc: PluginContext): Unit = {
     val conf = pc.conf()
@@ -252,27 +264,38 @@ class VeloxListenerApi extends ListenerApi with Logging {
       return
     }
 
-    val veloxConf = VeloxConfig.get
-    if (!veloxConf.cudfGpuSemaphoreEnabled) {
+    // Read directly from SparkConf, not VeloxConfig.get (which uses SQLConf).
+    // SQLConf is not yet bound to a session during onExecutorStart, so it would
+    // return default values.
+    val semaphoreEnabled =
+      conf.getBoolean(CUDF_GPU_SEMAPHORE_ENABLED.key, false)
+    logInfo(
+      s"GPU semaphore config: ${CUDF_GPU_SEMAPHORE_ENABLED.key}=$semaphoreEnabled " +
+        s"(raw=${conf.getOption(CUDF_GPU_SEMAPHORE_ENABLED.key)})")
+    if (!semaphoreEnabled) {
       logInfo("GPU semaphore is disabled (cudf.gpuSemaphore.enabled=false), using GpuLock")
       return
     }
-    val gpuMemorySize = veloxConf.cudfGpuMemorySize.getOrElse {
-      val memPercent = conf.getInt(CUDF_MEMORY_PERCENT.key, 50)
-      // Fallback: estimate 16 GB if we can't query actual GPU memory.
-      // In production, cudf.gpuMemorySize should be explicitly set.
-      val estimatedGpuMem = 16L * 1024 * 1024 * 1024
-      estimatedGpuMem * memPercent / 100
-    }
 
-    val concurrentTasks = veloxConf.cudfConcurrentGpuTasks
+    val gpuMemorySize = conf
+      .getOption(CUDF_GPU_MEMORY_SIZE.key)
+      .map(_.toLong)
+      .getOrElse {
+        val memPercent = conf.getInt(CUDF_MEMORY_PERCENT.key, 50)
+        val estimatedGpuMem = 16L * 1024 * 1024 * 1024
+        estimatedGpuMem * memPercent / 100
+      }
+
+    val concurrentTasks = conf.getOption(CUDF_CONCURRENT_GPU_TASKS.key).map(_.toInt)
     val batchSizeBytes = conf.getLong(GlutenConfig.COLUMNAR_MAX_BATCH_SIZE.key, 4096) * 8L
     val defaultConcurrent = concurrentTasks.getOrElse {
       math.max(1, math.min(4, gpuMemorySize / (4 * math.max(batchSizeBytes, 1)))).toInt
     }
     val defaultMemPerTask = math.max(gpuMemorySize / math.max(defaultConcurrent, 1), 1)
-    val maxConcurrentTasks = veloxConf.cudfMaxConcurrentGpuTasks
-    val dynamicEnabled = veloxConf.cudfConcurrentGpuTasksDynamic
+    val maxConcurrentTasks =
+      conf.getInt(CUDF_MAX_CONCURRENT_GPU_TASKS.key, 0)
+    val dynamicEnabled =
+      conf.getBoolean(CUDF_CONCURRENT_GPU_TASKS_DYNAMIC.key, true)
 
     val memoryProvider = if (dynamicEnabled) {
       try {
