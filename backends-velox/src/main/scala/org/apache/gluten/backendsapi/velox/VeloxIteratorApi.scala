@@ -20,6 +20,7 @@ import org.apache.gluten.backendsapi.{BackendsApiManager, IteratorApi}
 import org.apache.gluten.backendsapi.velox.VeloxIteratorApi.unescapePathName
 import org.apache.gluten.config.{GlutenConfig, VeloxConfig}
 import org.apache.gluten.execution._
+import org.apache.gluten.gpu.{GpuMemoryTrackerJniWrapper, GpuSemaphore}
 import org.apache.gluten.iterator.Iterators
 import org.apache.gluten.metrics.{IMetrics, IteratorMetricsJniWrapper}
 import org.apache.gluten.sql.shims.SparkShimLoader
@@ -193,6 +194,11 @@ class VeloxIteratorApi extends IteratorApi with Logging {
       inputPartition.isInstanceOf[GlutenPartition],
       "Velox backend only accept GlutenPartition.")
 
+    if (enableCudf && GpuSemaphore.isInitialized) {
+      GpuSemaphore.acquireIfNecessary(context)
+      trySetCurrentTask(context)
+    }
+
     val columnarNativeIterators = inputIterators.map {
       iter => new ColumnarBatchInIterator(BackendsApiManager.getBackendName, iter.asJava)
     }
@@ -228,6 +234,11 @@ class VeloxIteratorApi extends IteratorApi with Logging {
         updateNativeMetrics(itrMetrics.fetch(resIter))
         updateInputMetrics(context.taskMetrics().inputMetrics)
         resIter.close()
+        if (enableCudf && GpuSemaphore.isInitialized) {
+          tryStopTaskTracking(context)
+          GpuSemaphore.releaseIfNecessary(context)
+          tryClearTaskMemory(context)
+        }
       }
       .recyclePayload(batch => batch.close())
       .collectLifeMillis(millis => pipelineTime += millis)
@@ -248,6 +259,11 @@ class VeloxIteratorApi extends IteratorApi with Logging {
       partitionIndex: Int,
       materializeInput: Boolean,
       enableCudf: Boolean = false): Iterator[ColumnarBatch] = {
+    if (enableCudf && GpuSemaphore.isInitialized) {
+      GpuSemaphore.acquireIfNecessary(context)
+      trySetCurrentTask(context)
+    }
+
     val extraConf = Map(GlutenConfig.COLUMNAR_CUDF_ENABLED.key -> enableCudf.toString).asJava
     val transKernel = NativePlanEvaluator.create(BackendsApiManager.getBackendName, extraConf)
     val columnarNativeIterator =
@@ -276,12 +292,43 @@ class VeloxIteratorApi extends IteratorApi with Logging {
       .recycleIterator {
         updateNativeMetrics(itrMetrics.fetch(nativeResultIterator))
         nativeResultIterator.close()
+        if (enableCudf && GpuSemaphore.isInitialized) {
+          tryStopTaskTracking(context)
+          GpuSemaphore.releaseIfNecessary(context)
+          tryClearTaskMemory(context)
+        }
       }
       .recyclePayload(batch => batch.close())
       .collectLifeMillis(millis => pipelineTime += millis)
       .create()
   }
   // scalastyle:on argcount
+
+  private def trySetCurrentTask(context: TaskContext): Unit = {
+    try {
+      GpuMemoryTrackerJniWrapper.setCurrentTask(context.taskAttemptId())
+    } catch {
+      case _: UnsatisfiedLinkError => // JNI not loaded, skip
+    }
+  }
+
+  /** Stop attributing new GPU allocations to this task. */
+  private def tryStopTaskTracking(context: TaskContext): Unit = {
+    try {
+      GpuMemoryTrackerJniWrapper.clearCurrentTask()
+    } catch {
+      case _: UnsatisfiedLinkError =>
+    }
+  }
+
+  /** Clean up native tracking data after semaphore release has recorded the peak memory. */
+  private def tryClearTaskMemory(context: TaskContext): Unit = {
+    try {
+      GpuMemoryTrackerJniWrapper.clearTaskMemory(context.taskAttemptId())
+    } catch {
+      case _: UnsatisfiedLinkError =>
+    }
+  }
 }
 
 object VeloxIteratorApi {

@@ -32,6 +32,7 @@ DOCKER_IMAGE=""           # derived from SYSTEM unless --image is given explicit
 IMAGE_EXPLICIT=false
 SPARK_VERSION="3.5"
 BUILD_ARROW="ON"
+ENABLE_HDFS="OFF"
 REBUILD=false   # if true: skip Arrow, clear cmake cache, re-run velox+cpp+mvn only
 
 # Velox source — only used if VELOX_DIR does not exist (fallback clone).
@@ -61,6 +62,7 @@ Options:
   --velox_repo=URL          Velox git repo to clone if velox dir is missing
                             (default: https://gitlab-master.nvidia.com/alfxu/velox.git)
   --velox_branch=BRANCH     Velox branch to clone (default: alfxu_dev)
+  --enable_hdfs=ON|OFF      Enable HDFS support (default: OFF)
   --cuda_arch=ARCH          CUDA compute architectures (default: native)
                             native     — auto-detect local GPU
                             all-major  — 70,75,80,86,89,90 (portable)
@@ -78,6 +80,7 @@ for arg in "$@"; do
     --image=*)         DOCKER_IMAGE="${arg#*=}"; IMAGE_EXPLICIT=true ;;
     --velox_repo=*)    VELOX_REPO="${arg#*=}" ;;
     --velox_branch=*)  VELOX_BRANCH="${arg#*=}" ;;
+    --enable_hdfs=*)   ENABLE_HDFS="${arg#*=}" ;;
     --cuda_arch=*)     CUDA_ARCH="${arg#*=}"; CUDA_ARCH_EXPLICIT=true ;;
     -h|--help)         usage; exit 0 ;;
     *) echo "Unknown option: $arg"; usage; exit 1 ;;
@@ -164,6 +167,7 @@ echo " Docker image  : $DOCKER_IMAGE"
 echo " Container     : $CONTAINER_NAME"
 echo " Spark version : $SPARK_VERSION"
 echo " Build Arrow   : $BUILD_ARROW"
+echo " Enable HDFS   : $ENABLE_HDFS"
 echo " Rebuild mode  : $REBUILD"
 echo "=============================================="
 echo ""
@@ -222,6 +226,7 @@ docker exec "$CONTAINER_NAME" bash -c "
     --build_arrow=${BUILD_ARROW} \
     --spark_version=${SPARK_VERSION} \
     --enable_gpu=ON \
+    --enable_hdfs=${ENABLE_HDFS} \
     --velox_home=/opt/velox \
     --velox_repo=${VELOX_REPO} \
     --velox_branch=${VELOX_BRANCH} \

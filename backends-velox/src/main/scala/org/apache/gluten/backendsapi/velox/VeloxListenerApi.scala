@@ -23,6 +23,7 @@ import org.apache.gluten.config.VeloxConfig._
 import org.apache.gluten.execution.datasource.GlutenFormatFactory
 import org.apache.gluten.expression.UDFMappings
 import org.apache.gluten.extension.columnar.transition.Convention
+import org.apache.gluten.gpu.{GpuMemoryTrackerJniWrapper, GpuSemaphore, RmmGpuMemoryProvider}
 import org.apache.gluten.init.NativeBackendInitializer
 import org.apache.gluten.jni.{JniLibLoader, JniWorkspace}
 import org.apache.gluten.memory.{MemoryUsageRecorder, SimpleMemoryUsageRecorder}
@@ -158,10 +159,19 @@ class VeloxListenerApi extends ListenerApi with Logging {
 
     SparkDirectoryUtil.init(conf)
     initialize(conf, isDriver = false)
+    initializeGpuSemaphore(conf)
     addIfNeedMemoryDumpShutdownHook(conf)
   }
 
-  override def onExecutorShutdown(): Unit = shutdown()
+  override def onExecutorShutdown(): Unit = {
+    GpuSemaphore.shutdown()
+    try {
+      GpuMemoryTrackerJniWrapper.shutdown()
+    } catch {
+      case _: UnsatisfiedLinkError => // JNI not loaded, nothing to shut down
+    }
+    shutdown()
+  }
 
   private def initialize(conf: SparkConf, isDriver: Boolean): Unit = {
     // Sets this configuration only once, since not undoable.
@@ -234,6 +244,57 @@ class VeloxListenerApi extends ListenerApi with Logging {
     GlutenFormatFactory.injectPostRuleFactory(
       session => GlutenWriterColumnarRules.NativeWritePostRule(session))
     GlutenFormatFactory.register(new VeloxRowSplitter())
+  }
+
+  private def initializeGpuSemaphore(conf: SparkConf): Unit = {
+    val cudfEnabled = conf.getBoolean(GlutenConfig.COLUMNAR_CUDF_ENABLED.key, false)
+    if (!cudfEnabled) {
+      return
+    }
+
+    val veloxConf = VeloxConfig.get
+    if (!veloxConf.cudfGpuSemaphoreEnabled) {
+      logInfo("GPU semaphore is disabled (cudf.gpuSemaphore.enabled=false), using GpuLock")
+      return
+    }
+    val gpuMemorySize = veloxConf.cudfGpuMemorySize.getOrElse {
+      val memPercent = conf.getInt(CUDF_MEMORY_PERCENT.key, 50)
+      // Fallback: estimate 16 GB if we can't query actual GPU memory.
+      // In production, cudf.gpuMemorySize should be explicitly set.
+      val estimatedGpuMem = 16L * 1024 * 1024 * 1024
+      estimatedGpuMem * memPercent / 100
+    }
+
+    val concurrentTasks = veloxConf.cudfConcurrentGpuTasks
+    val batchSizeBytes = conf.getLong(GlutenConfig.COLUMNAR_MAX_BATCH_SIZE.key, 4096) * 8L
+    val defaultConcurrent = concurrentTasks.getOrElse {
+      math.max(1, math.min(4, gpuMemorySize / (4 * math.max(batchSizeBytes, 1)))).toInt
+    }
+    val defaultMemPerTask = math.max(gpuMemorySize / math.max(defaultConcurrent, 1), 1)
+    val maxConcurrentTasks = veloxConf.cudfMaxConcurrentGpuTasks
+    val dynamicEnabled = veloxConf.cudfConcurrentGpuTasksDynamic
+
+    val memoryProvider = if (dynamicEnabled) {
+      try {
+        GpuMemoryTrackerJniWrapper.initialize()
+        logInfo("Native GpuMemoryTracker initialized for dynamic estimation")
+        new RmmGpuMemoryProvider()
+      } catch {
+        case e: UnsatisfiedLinkError =>
+          logWarning(
+            s"GpuMemoryTracker JNI not available, falling back to no-op provider: ${e.getMessage}")
+          org.apache.gluten.gpu.NoOpGpuMemoryProvider
+      }
+    } else {
+      org.apache.gluten.gpu.NoOpGpuMemoryProvider
+    }
+
+    GpuSemaphore.initialize(
+      gpuMemorySize,
+      defaultMemPerTask,
+      maxConcurrentTasks,
+      dynamicEnabled,
+      memoryProvider)
   }
 
   private def addIfNeedMemoryDumpShutdownHook(conf: SparkConf): Unit = {

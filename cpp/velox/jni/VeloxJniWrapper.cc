@@ -41,6 +41,7 @@
 
 #ifdef GLUTEN_ENABLE_GPU
 #include "cudf/CudfPlanValidator.h"
+#include "cudf/GpuMemoryTracker.h"
 #include "utils/GpuBufferBatchResizer.h"
 #endif
 
@@ -833,6 +834,65 @@ JNIEXPORT jboolean JNICALL Java_org_apache_gluten_cudf_VeloxCudfPlanValidatorJni
   // get the task and driver, validate the plan, if return all operator except table scan is offloaded, validate true.
   return CudfPlanValidator::validate(substraitPlan);
   JNI_METHOD_END(false)
+}
+
+JNIEXPORT void JNICALL Java_org_apache_gluten_gpu_GpuMemoryTrackerJniWrapper_initialize( // NOLINT
+    JNIEnv* env,
+    jclass) {
+  JNI_METHOD_START
+  GpuMemoryTracker::initialize();
+  JNI_METHOD_END()
+}
+
+JNIEXPORT void JNICALL Java_org_apache_gluten_gpu_GpuMemoryTrackerJniWrapper_shutdown( // NOLINT
+    JNIEnv* env,
+    jclass) {
+  JNI_METHOD_START
+  GpuMemoryTracker::shutdown();
+  JNI_METHOD_END()
+}
+
+JNIEXPORT void JNICALL Java_org_apache_gluten_gpu_GpuMemoryTrackerJniWrapper_setCurrentTask( // NOLINT
+    JNIEnv* env,
+    jclass,
+    jlong taskId) {
+  JNI_METHOD_START
+  GpuMemoryTracker::setCurrentTask(taskId);
+  JNI_METHOD_END()
+}
+
+JNIEXPORT void JNICALL Java_org_apache_gluten_gpu_GpuMemoryTrackerJniWrapper_clearCurrentTask( // NOLINT
+    JNIEnv* env,
+    jclass) {
+  JNI_METHOD_START
+  GpuMemoryTracker::clearCurrentTask();
+  JNI_METHOD_END()
+}
+
+JNIEXPORT jlong JNICALL Java_org_apache_gluten_gpu_GpuMemoryTrackerJniWrapper_getMaxTaskMemory( // NOLINT
+    JNIEnv* env,
+    jclass,
+    jlong taskId) {
+  JNI_METHOD_START
+  auto tracker = GpuMemoryTracker::instance();
+  if (tracker == nullptr) {
+    return 0;
+  }
+  return tracker->getMaxTaskMemory(taskId);
+  JNI_METHOD_END(0)
+}
+
+JNIEXPORT jlong JNICALL Java_org_apache_gluten_gpu_GpuMemoryTrackerJniWrapper_clearTaskMemory( // NOLINT
+    JNIEnv* env,
+    jclass,
+    jlong taskId) {
+  JNI_METHOD_START
+  auto tracker = GpuMemoryTracker::instance();
+  if (tracker == nullptr) {
+    return 0;
+  }
+  return tracker->clearTaskMemory(taskId);
+  JNI_METHOD_END(0)
 }
 #endif
 

@@ -82,6 +82,16 @@ class VeloxConfig(conf: SQLConf) extends GlutenConfig(conf) {
 
   def cudfBatchSize: Int = getConf(CUDF_BATCH_SIZE)
 
+  def cudfGpuSemaphoreEnabled: Boolean = getConf(CUDF_GPU_SEMAPHORE_ENABLED)
+
+  def cudfConcurrentGpuTasks: Option[Int] = getConf(CUDF_CONCURRENT_GPU_TASKS)
+
+  def cudfConcurrentGpuTasksDynamic: Boolean = getConf(CUDF_CONCURRENT_GPU_TASKS_DYNAMIC)
+
+  def cudfMaxConcurrentGpuTasks: Int = getConf(CUDF_MAX_CONCURRENT_GPU_TASKS)
+
+  def cudfGpuMemorySize: Option[Long] = getConf(CUDF_GPU_MEMORY_SIZE)
+
   def orcUseColumnNames: Boolean = getConf(ORC_USE_COLUMN_NAMES)
 
   def parquetUseColumnNames: Boolean = getConf(PARQUET_USE_COLUMN_NAMES)
@@ -676,6 +686,50 @@ object VeloxConfig extends ConfigRegistry {
       .doc("Cudf input batch size after shuffle reader")
       .intConf
       .createWithDefault(Integer.MAX_VALUE)
+
+  val CUDF_GPU_SEMAPHORE_ENABLED =
+    buildConf("spark.gluten.sql.columnar.backend.velox.cudf.gpuSemaphore.enabled")
+      .doc(
+        "When true, enables the GPU semaphore for concurrent task scheduling. " +
+          "The semaphore controls how many Spark tasks can use the GPU simultaneously " +
+          "based on permit-based memory estimation. When false, the original single-task " +
+          "GPU lock is used. Only takes effect when cudf is enabled.")
+      .booleanConf
+      .createWithDefault(false)
+
+  val CUDF_CONCURRENT_GPU_TASKS =
+    buildConf("spark.gluten.sql.columnar.backend.velox.cudf.concurrentGpuTasks")
+      .doc(
+        "Number of concurrent GPU tasks allowed per executor. " +
+          "When set, this is used as the initial concurrency level. " +
+          "If not set, auto-computed from GPU memory and batch size.")
+      .intConf
+      .createOptional
+
+  val CUDF_CONCURRENT_GPU_TASKS_DYNAMIC =
+    buildConf("spark.gluten.sql.columnar.backend.velox.cudf.concurrentGpuTasks.dynamic")
+      .doc(
+        "When true, dynamically adjust per-task GPU memory permits based on " +
+          "actual measured usage. The system starts with the initial estimate and " +
+          "adapts as tasks in the same stage complete.")
+      .booleanConf
+      .createWithDefault(true)
+
+  val CUDF_MAX_CONCURRENT_GPU_TASKS =
+    buildConf("spark.gluten.sql.columnar.backend.velox.cudf.maxConcurrentGpuTasks")
+      .doc(
+        "Hard limit on the number of concurrent GPU tasks regardless of memory. " +
+          "0 means no limit (controlled by permits only).")
+      .intConf
+      .createWithDefault(0)
+
+  val CUDF_GPU_MEMORY_SIZE =
+    buildConf("spark.gluten.sql.columnar.backend.velox.cudf.gpuMemorySize")
+      .doc(
+        "Total GPU memory available for task scheduling (in bytes). " +
+          "If not set, defaults to the GPU memory allocated by RMM.")
+      .bytesConf(ByteUnit.BYTE)
+      .createOptional
 
   val MEMORY_DUMP_ON_EXIT =
     buildConf("spark.gluten.monitor.memoryDumpOnExit")
