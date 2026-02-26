@@ -298,13 +298,17 @@ class LocalPartitionWriter::PayloadCache {
       int32_t compressionThreshold,
       bool enableDictionary,
       arrow::MemoryPool* pool,
-      MemoryManager* memoryManager)
+      MemoryManager* memoryManager,
+      int32_t compressionThreads = 1,
+      CompressionThreadPool* threadPool = nullptr)
       : numPartitions_(numPartitions),
         codec_(codec),
         compressionThreshold_(compressionThreshold),
         enableDictionary_(enableDictionary),
         pool_(pool),
-        memoryManager_(memoryManager) {}
+        memoryManager_(memoryManager),
+        compressionThreads_(compressionThreads),
+        threadPool_(threadPool) {}
 
   arrow::Status cache(uint32_t partitionId, std::unique_ptr<InMemoryPayload> payload) {
     PartitionScopeGuard cacheGuard(partitionInUse_, partitionId);
@@ -323,7 +327,12 @@ class LocalPartitionWriter::PayloadCache {
     bool shouldCompress = codec_ != nullptr && payload->numRows() >= compressionThreshold_;
     ARROW_ASSIGN_OR_RAISE(
         auto block,
-        payload->toBlockPayload(shouldCompress ? Payload::kCompressed : Payload::kUncompressed, pool_, codec_));
+        payload->toBlockPayload(
+            shouldCompress ? Payload::kCompressed : Payload::kUncompressed,
+            pool_,
+            codec_,
+            compressionThreads_,
+            threadPool_));
 
     partitionCachedPayload_[partitionId].push_back(std::move(block));
 
@@ -485,6 +494,8 @@ class LocalPartitionWriter::PayloadCache {
   bool enableDictionary_;
   arrow::MemoryPool* pool_;
   MemoryManager* memoryManager_;
+  int32_t compressionThreads_;
+  CompressionThreadPool* threadPool_;
 
   int64_t compressTime_{0};
   int64_t spillTime_{0};
@@ -511,6 +522,9 @@ LocalPartitionWriter::LocalPartitionWriter(
       options_(options),
       dataFile_(dataFile),
       localDirs_(std::move(localDirs)) {
+  if (options_->compressionThreads > 1) {
+    compressionPool_ = std::make_unique<CompressionThreadPool>(options_->compressionThreads);
+  }
   init();
 }
 
@@ -696,7 +710,9 @@ arrow::Status LocalPartitionWriter::finishMerger() {
               options_->compressionThreshold,
               options_->enableDictionary,
               payloadPool_.get(),
-              memoryManager_);
+              memoryManager_,
+              options_->compressionThreads,
+              compressionPool_.get());
         }
         // Spill can be triggered by compressing or building dictionaries.
         RETURN_NOT_OK(payloadCache_->cache(pid, std::move(maybeMerged.value())));
@@ -722,7 +738,11 @@ arrow::Status LocalPartitionWriter::hashEvict(
     ARROW_ASSIGN_OR_RAISE(
         auto payload,
         inMemoryPayload->toBlockPayload(
-            shouldCompress ? Payload::kToBeCompressed : Payload::kUncompressed, payloadPool_.get(), codec_.get()));
+            shouldCompress ? Payload::kToBeCompressed : Payload::kUncompressed,
+            payloadPool_.get(),
+            codec_.get(),
+            options_->compressionThreads,
+            compressionPool_.get()));
 
     RETURN_NOT_OK(spiller_->spill(partitionId, std::move(payload)));
     return arrow::Status::OK();
@@ -745,7 +765,9 @@ arrow::Status LocalPartitionWriter::hashEvict(
           options_->compressionThreshold,
           options_->enableDictionary,
           payloadPool_.get(),
-          memoryManager_);
+          memoryManager_,
+          options_->compressionThreads,
+          compressionPool_.get());
     }
     for (auto& payload : merged) {
       RETURN_NOT_OK(payloadCache_->cache(partitionId, std::move(payload)));
@@ -826,7 +848,11 @@ arrow::Status LocalPartitionWriter::reclaimFixedSize(int64_t size, int64_t* actu
         ARROW_ASSIGN_OR_RAISE(
             auto payload,
             merged->toBlockPayload(
-                shouldCompress ? Payload::kToBeCompressed : Payload::kUncompressed, payloadPool_.get(), codec_.get()));
+                shouldCompress ? Payload::kToBeCompressed : Payload::kUncompressed,
+                payloadPool_.get(),
+                codec_.get(),
+                options_->compressionThreads,
+                compressionPool_.get()));
 
         RETURN_NOT_OK(spiller_->spill(pid, std::move(payload)));
       }

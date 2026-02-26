@@ -20,6 +20,9 @@
 #include <arrow/buffer.h>
 #include <arrow/io/interfaces.h>
 #include <arrow/memory_pool.h>
+#include <arrow/util/compression.h>
+
+#include "shuffle/CompressionThreadPool.h"
 
 #include "shuffle/Dictionary.h"
 #include "shuffle/Options.h"
@@ -79,7 +82,9 @@ class BlockPayload final : public Payload {
       std::vector<std::shared_ptr<arrow::Buffer>> buffers,
       const std::vector<bool>* isValidityBuffer,
       arrow::MemoryPool* pool,
-      arrow::util::Codec* codec);
+      arrow::util::Codec* codec,
+      int32_t compressionThreads = 1,
+      CompressionThreadPool* threadPool = nullptr);
 
   static arrow::Result<std::vector<std::shared_ptr<arrow::Buffer>>> deserialize(
       arrow::io::InputStream* inputStream,
@@ -135,7 +140,12 @@ class InMemoryPayload final : public Payload {
   arrow::Result<std::shared_ptr<arrow::Buffer>> readBufferAt(uint32_t index);
 
   arrow::Result<std::unique_ptr<BlockPayload>>
-  toBlockPayload(Payload::Type payloadType, arrow::MemoryPool* pool, arrow::util::Codec* codec);
+  toBlockPayload(
+      Payload::Type payloadType,
+      arrow::MemoryPool* pool,
+      arrow::util::Codec* codec,
+      int32_t compressionThreads = 1,
+      CompressionThreadPool* threadPool = nullptr);
 
   arrow::Status copyBuffers(arrow::MemoryPool* pool);
 

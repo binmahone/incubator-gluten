@@ -236,6 +236,9 @@ class GlutenConfig(conf: SQLConf) extends GlutenCoreConfig(conf) {
   def columnarShuffleEnableDictionary: Boolean =
     getConf(SHUFFLE_ENABLE_DICTIONARY)
 
+  def columnarShuffleCompressionThreads: Int =
+    getConf(SHUFFLE_COMPRESSION_THREADS)
+
   def maxBatchSize: Int = getConf(COLUMNAR_MAX_BATCH_SIZE)
 
   def shuffleWriterBufferSize: Int = getConf(SHUFFLE_WRITER_BUFFER_SIZE)
@@ -1068,6 +1071,16 @@ object GlutenConfig extends ConfigRegistry {
       .doc("Enable dictionary in hash-based shuffle.")
       .booleanConf
       .createWithDefault(false)
+
+  val SHUFFLE_COMPRESSION_THREADS =
+    buildConf("spark.gluten.sql.columnar.shuffle.compression.threads")
+      .doc("Number of threads for parallel shuffle compression. " +
+        "Column buffers within a batch are compressed concurrently. " +
+        "1 means single-threaded (default). " +
+        "Higher values use more CPU cores to reduce compression latency.")
+      .intConf
+      .checkValue(_ >= 1, "Compression threads must be at least 1")
+      .createWithDefault(1)
 
   val COLUMNAR_MAX_BATCH_SIZE =
     buildConf("spark.gluten.sql.columnar.maxBatchSize").intConf

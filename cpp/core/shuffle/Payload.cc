@@ -19,7 +19,9 @@
 #include <arrow/buffer.h>
 #include <arrow/io/memory.h>
 #include <arrow/util/bitmap.h>
+#include <arrow/util/compression.h>
 #include <iostream>
+#include "shuffle/CompressionThreadPool.h"
 #include <numeric>
 
 #include "shuffle/Options.h"
@@ -185,38 +187,148 @@ arrow::Result<std::unique_ptr<BlockPayload>> BlockPayload::fromBuffers(
     std::vector<std::shared_ptr<arrow::Buffer>> buffers,
     const std::vector<bool>* isValidityBuffer,
     arrow::MemoryPool* pool,
-    arrow::util::Codec* codec) {
+    arrow::util::Codec* codec,
+    int32_t compressionThreads,
+    CompressionThreadPool* threadPool) {
   const uint32_t numBuffers = buffers.size();
 
   if (payloadType == Payload::Type::kCompressed) {
     Timer compressionTime;
     compressionTime.start();
-    // Compress.
-    auto maxLength = maxCompressedLength(buffers, codec);
-    std::shared_ptr<arrow::Buffer> compressedBuffer;
 
-    ARROW_ASSIGN_OR_RAISE(compressedBuffer, arrow::AllocateResizableBuffer(maxLength, pool));
-    auto* output = compressedBuffer->mutable_data();
+    const bool useParallel = compressionThreads > 1 && numBuffers > 1 && threadPool != nullptr;
 
-    int64_t actualLength = 0;
-    // Compress buffers one by one.
-    for (auto& buffer : buffers) {
-      auto availableLength = maxLength - actualLength;
-      // Release buffer after compression.
-      ARROW_ASSIGN_OR_RAISE(auto compressedSize, compressBuffer(std::move(buffer), output, availableLength, codec));
-      output += compressedSize;
-      actualLength += compressedSize;
+    if (!useParallel) {
+      auto maxLength = maxCompressedLength(buffers, codec);
+      std::shared_ptr<arrow::Buffer> compressedBuffer;
+
+      ARROW_ASSIGN_OR_RAISE(compressedBuffer, arrow::AllocateResizableBuffer(maxLength, pool));
+      auto* output = compressedBuffer->mutable_data();
+
+      int64_t actualLength = 0;
+      for (auto& buffer : buffers) {
+        auto availableLength = maxLength - actualLength;
+        ARROW_ASSIGN_OR_RAISE(auto compressedSize, compressBuffer(std::move(buffer), output, availableLength, codec));
+        output += compressedSize;
+        actualLength += compressedSize;
+      }
+
+      ARROW_RETURN_IF(actualLength < 0, arrow::Status::Invalid("Writing compressed buffer out of bound."));
+      RETURN_NOT_OK(std::dynamic_pointer_cast<arrow::ResizableBuffer>(compressedBuffer)->Resize(actualLength));
+
+      compressionTime.stop();
+      auto payload = std::unique_ptr<BlockPayload>(
+          new BlockPayload(Type::kCompressed, numRows, numBuffers, {compressedBuffer}, isValidityBuffer));
+      payload->setCompressionTime(compressionTime.realTimeUsed());
+      return payload;
     }
 
-    ARROW_RETURN_IF(actualLength < 0, arrow::Status::Invalid("Writing compressed buffer out of bound."));
+    // Parallel compression: launch exactly N worker threads, each processing a
+    // round-robin share of buffers. This minimizes thread creation overhead
+    // compared to std::async (N threads total, not one per buffer per wave).
+    auto codecType = codec->compression_type();
+    auto codecLevel = codec->compression_level();
 
-    RETURN_NOT_OK(std::dynamic_pointer_cast<arrow::ResizableBuffer>(compressedBuffer)->Resize(actualLength));
+    struct PerBufferResult {
+      std::shared_ptr<arrow::ResizableBuffer> data;
+      int64_t compressedSize{0};
+      arrow::Status status{arrow::Status::OK()};
+    };
+
+    std::vector<PerBufferResult> results(numBuffers);
+
+    std::vector<uint32_t> nonTrivialIndices;
+    nonTrivialIndices.reserve(numBuffers);
+    for (uint32_t i = 0; i < numBuffers; i++) {
+      if (!buffers[i] || buffers[i]->size() == 0) {
+        int64_t headerMaxLen = sizeof(int64_t);
+        ARROW_ASSIGN_OR_RAISE(auto tmp, arrow::AllocateResizableBuffer(headerMaxLen, pool));
+        ARROW_ASSIGN_OR_RAISE(
+            auto sz, compressBuffer(std::move(buffers[i]), tmp->mutable_data(), headerMaxLen, codec));
+        RETURN_NOT_OK(tmp->Resize(sz));
+        results[i] = {std::move(tmp), sz, arrow::Status::OK()};
+      } else {
+        nonTrivialIndices.push_back(i);
+      }
+    }
+
+    // Pre-allocate output buffers on the main thread to eliminate allocator
+    // contention among worker threads.
+    for (const auto idx : nonTrivialIndices) {
+      int64_t maxLen =
+          sizeof(int64_t) * 2 + codec->MaxCompressedLen(buffers[idx]->size(), buffers[idx]->data());
+      ARROW_ASSIGN_OR_RAISE(auto tmp, arrow::AllocateResizableBuffer(maxLen, pool));
+      results[idx].data = std::move(tmp);
+    }
+
+    const int32_t numWorkers =
+        std::min(static_cast<int32_t>(nonTrivialIndices.size()), compressionThreads);
+
+    std::vector<std::function<void()>> tasks;
+    tasks.reserve(numWorkers);
+
+    for (int32_t t = 0; t < numWorkers; t++) {
+      tasks.emplace_back(
+          [t, numWorkers, &nonTrivialIndices, &buffers, &results, codecType, codecLevel]() {
+            auto localCodec = arrow::util::Codec::Create(codecType, codecLevel);
+            if (!localCodec.ok()) {
+              for (size_t j = t; j < nonTrivialIndices.size();
+                   j += static_cast<size_t>(numWorkers)) {
+                results[nonTrivialIndices[j]].status = localCodec.status();
+              }
+              return;
+            }
+
+            for (size_t j = t; j < nonTrivialIndices.size();
+                 j += static_cast<size_t>(numWorkers)) {
+              uint32_t idx = nonTrivialIndices[j];
+              auto& buf = buffers[idx];
+              auto& res = results[idx];
+
+              auto compressResult = compressBuffer(
+                  buf, res.data->mutable_data(), res.data->size(), localCodec->get());
+              if (!compressResult.ok()) {
+                res.status = compressResult.status();
+                return;
+              }
+              res.compressedSize = *compressResult;
+
+              auto resizeStatus = res.data->Resize(res.compressedSize);
+              if (!resizeStatus.ok()) {
+                res.status = resizeStatus;
+                return;
+              }
+              buf.reset();
+            }
+          });
+    }
+
+    threadPool->submitAndWait(tasks);
+
+    for (const auto& idx : nonTrivialIndices) {
+      RETURN_NOT_OK(results[idx].status);
+    }
+
+    // Concatenate into a single contiguous buffer.
+    int64_t totalSize = 0;
+    for (const auto& r : results) {
+      totalSize += r.compressedSize;
+    }
+
+    ARROW_ASSIGN_OR_RAISE(auto compressedBuffer, arrow::AllocateResizableBuffer(totalSize, pool));
+    auto* output = compressedBuffer->mutable_data();
+    for (auto& r : results) {
+      memcpy(output, r.data->data(), r.compressedSize);
+      output += r.compressedSize;
+      r.data.reset();
+    }
 
     compressionTime.stop();
+    std::vector<std::shared_ptr<arrow::Buffer>> compressedBuffers;
+    compressedBuffers.push_back(std::move(compressedBuffer));
     auto payload = std::unique_ptr<BlockPayload>(
-        new BlockPayload(Type::kCompressed, numRows, numBuffers, {compressedBuffer}, isValidityBuffer));
+        new BlockPayload(Type::kCompressed, numRows, numBuffers, std::move(compressedBuffers), isValidityBuffer));
     payload->setCompressionTime(compressionTime.realTimeUsed());
-
     return payload;
   }
   return std::unique_ptr<BlockPayload>(
@@ -417,8 +529,14 @@ arrow::Result<std::unique_ptr<InMemoryPayload>> InMemoryPayload::merge(
 }
 
 arrow::Result<std::unique_ptr<BlockPayload>>
-InMemoryPayload::toBlockPayload(Payload::Type payloadType, arrow::MemoryPool* pool, arrow::util::Codec* codec) {
-  return BlockPayload::fromBuffers(payloadType, numRows_, std::move(buffers_), isValidityBuffer_, pool, codec);
+InMemoryPayload::toBlockPayload(
+    Payload::Type payloadType,
+    arrow::MemoryPool* pool,
+    arrow::util::Codec* codec,
+    int32_t compressionThreads,
+    CompressionThreadPool* threadPool) {
+  return BlockPayload::fromBuffers(
+      payloadType, numRows_, std::move(buffers_), isValidityBuffer_, pool, codec, compressionThreads, threadPool);
 }
 
 arrow::Status InMemoryPayload::serialize(arrow::io::OutputStream* outputStream) {
