@@ -143,6 +143,10 @@ class ColumnarShuffleWriter[K, V](
         logInfo(s"Skip ColumnarBatch of ${cb.numRows} rows, ${cb.numCols} cols")
       } else {
         if (nativeShuffleWriter == -1L) {
+          val compressionThreads = GlutenConfig.get.columnarShuffleCompressionThreads
+          if (compressionThreads > 1) {
+            logInfo(s"Parallel shuffle compression: $compressionThreads threads")
+          }
           val partitionWriterHandle = partitionWriterJniWrapper.createPartitionWriter(
             numPartitions,
             compressionCodec.orNull,
@@ -157,7 +161,7 @@ class ColumnarShuffleWriter[K, V](
             tempDataFile.getAbsolutePath,
             localDirs,
             GlutenConfig.get.columnarShuffleEnableDictionary,
-            GlutenConfig.get.columnarShuffleCompressionThreads
+            compressionThreads
           )
 
           nativeShuffleWriter = if (isSort) {

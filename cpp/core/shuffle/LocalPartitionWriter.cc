@@ -524,6 +524,8 @@ LocalPartitionWriter::LocalPartitionWriter(
       localDirs_(std::move(localDirs)) {
   if (options_->compressionThreads > 1) {
     compressionPool_ = std::make_unique<CompressionThreadPool>(options_->compressionThreads);
+    LOG(INFO) << "Parallel shuffle compression enabled: " << options_->compressionThreads
+              << " threads, numPartitions=" << numPartitions;
   }
   init();
 }
