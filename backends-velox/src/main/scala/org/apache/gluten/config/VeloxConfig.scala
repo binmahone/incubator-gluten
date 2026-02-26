@@ -687,6 +687,16 @@ object VeloxConfig extends ConfigRegistry {
       .intConf
       .createWithDefault(Integer.MAX_VALUE)
 
+  val CUDF_GPU_TARGET_BATCH_ROWS =
+    buildStaticConf("spark.gluten.sql.columnar.backend.velox.cudf.gpuTargetBatchRows")
+      .doc(
+        "Target minimum number of rows for a GPU batch. Operators that may produce " +
+          "or receive tiny batches (e.g. hash-probe after many small shuffled partitions, " +
+          "or filter with high selectivity) accumulate rows until this threshold is reached " +
+          "before launching GPU kernels. Set to 0 to disable accumulation.")
+      .intConf
+      .createWithDefault(1000000)
+
   val CUDF_GPU_SEMAPHORE_ENABLED =
     buildConf("spark.gluten.sql.columnar.backend.velox.cudf.gpuSemaphore.enabled")
       .doc(
@@ -767,7 +777,7 @@ object VeloxConfig extends ConfigRegistry {
     buildConf("spark.gluten.sql.columnar.backend.velox.preferredBatchBytes")
       .internal()
       .bytesConf(ByteUnit.BYTE)
-      .createWithDefaultString("100MB")
+      .createWithDefaultString("10MB")
 
   val VELOX_MAX_COMPILED_REGEXES =
     buildConf("spark.gluten.sql.columnar.backend.velox.maxCompiledRegexes")
