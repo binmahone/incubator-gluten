@@ -31,6 +31,7 @@ class GpuBufferBatchResizeForShuffleInputOutputSuite extends VeloxWholeStageTran
     .set("spark.shuffle.manager", "org.apache.spark.shuffle.sort.ColumnarShuffleManager")
     .set(GlutenConfig.COLUMNAR_CUDF_ENABLED.key, "true")
     .set(VeloxConfig.CUDF_ENABLE_VALIDATION.key, "false")
+    .set(VeloxConfig.CUDF_GPU_TARGET_BATCH_ROWS.key, "500")
 
   test("non-AQE: GPUColumnarShuffleExchangeExec wrapped with GpuResizeBufferColumnarBatchExec") {
     withSQLConf(
@@ -83,6 +84,18 @@ class GpuBufferBatchResizeForShuffleInputOutputSuite extends VeloxWholeStageTran
 
       val resizers = plan.collect { case _: GpuResizeBufferColumnarBatchExec => true }
       assert(resizers.isEmpty, "No GpuResizeBufferColumnarBatchExec expected when cudf is disabled")
+    }
+  }
+
+  test("gpuTargetBatchRows config reaches native and filter query is correct") {
+    withSQLConf("spark.sql.adaptive.enabled" -> "false") {
+      createTPCHNotNullTables()
+      val df = spark.sql("""select l_orderkey, l_partkey, l_quantity
+                           |from lineitem
+                           |where l_quantity > 30""".stripMargin)
+      checkAnswer(
+        df,
+        spark.sql("select l_orderkey, l_partkey, l_quantity from lineitem where l_quantity > 30"))
     }
   }
 }

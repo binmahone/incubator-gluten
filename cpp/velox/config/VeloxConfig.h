@@ -201,6 +201,9 @@ const std::string kCudfEnableTableScan = "spark.gluten.sql.columnar.backend.velo
 const bool kCudfEnableTableScanDefault = false;
 const std::string kCudfHiveConnectorId = "cudf-hive";
 
+const std::string kCudfGpuTargetBatchRows = "spark.gluten.sql.columnar.backend.velox.cudf.gpuTargetBatchRows";
+const std::string kCudfGpuTargetBatchRowsDefault = "1000000";
+
 const std::string kStaticBackendConfPrefix = "spark.gluten.velox.";
 const std::string kDynamicBackendConfPrefix = "spark.gluten.sql.columnar.backend.velox.";
 
