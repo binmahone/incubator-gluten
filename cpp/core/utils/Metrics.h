@@ -93,6 +93,9 @@ struct Metrics {
     // Load lazy vector.
     kLoadLazyVectorTime,
 
+    // Batch coalescing.
+    kNumCoalescedBatches,
+
     // The end of enum items.
     kEnd,
     kNum = kEnd - kBegin

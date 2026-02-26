@@ -63,6 +63,8 @@ public class Metrics implements IMetrics {
 
   public long[] loadLazyVectorTime;
 
+  public long[] numCoalescedBatches;
+
   public SingleMetric singleMetric = new SingleMetric();
 
   public String taskStats;
@@ -111,6 +113,7 @@ public class Metrics implements IMetrics {
       long[] writeIOTime,
       long[] numWrittenFiles,
       long[] loadLazyVectorTime,
+      long[] numCoalescedBatches,
       String taskStats) {
     this.inputRows = inputRows;
     this.inputVectors = inputVectors;
@@ -155,6 +158,7 @@ public class Metrics implements IMetrics {
     this.writeIOTime = writeIOTime;
     this.numWrittenFiles = numWrittenFiles;
     this.loadLazyVectorTime = loadLazyVectorTime;
+    this.numCoalescedBatches = numCoalescedBatches;
     this.taskStats = taskStats;
   }
 
@@ -204,7 +208,8 @@ public class Metrics implements IMetrics {
         physicalWrittenBytes[index],
         writeIOTime[index],
         numWrittenFiles[index],
-        loadLazyVectorTime[index]);
+        loadLazyVectorTime[index],
+        numCoalescedBatches[index]);
   }
 
   public SingleMetric getSingleMetrics() {

@@ -610,6 +610,7 @@ JNIEXPORT jobject JNICALL Java_org_apache_gluten_metrics_IteratorMetricsJniWrapp
       longArray[Metrics::kWriteIOTime],
       longArray[Metrics::kNumWrittenFiles],
       longArray[Metrics::kLoadLazyVectorTime],
+      longArray[Metrics::kNumCoalescedBatches],
       metrics && metrics->stats.has_value() ? env->NewStringUTF(metrics->stats->c_str()) : nullptr);
 
   JNI_METHOD_END(nullptr)
