@@ -292,21 +292,21 @@ arrow::Result<std::unique_ptr<BlockPayload>> BlockPayload::fromBuffers(
                 return;
               }
               res.compressedSize = *compressResult;
-
-              auto resizeStatus = res.data->Resize(res.compressedSize);
-              if (!resizeStatus.ok()) {
-                res.status = resizeStatus;
-                return;
-              }
-              buf.reset();
+              // NOTE: Do NOT call res.data->Resize() or buf.reset() here.
+              // Arrow's Resize() may call pool->Reallocate() and shared_ptr
+              // reset may call pool->Free(). Gluten's memory pool is not
+              // thread-safe, so all pool operations must happen on the main thread.
             }
           });
     }
 
     threadPool->submitAndWait(tasks);
 
+    // Post-processing on main thread: resize output buffers and release inputs.
     for (const auto& idx : nonTrivialIndices) {
       RETURN_NOT_OK(results[idx].status);
+      RETURN_NOT_OK(results[idx].data->Resize(results[idx].compressedSize));
+      buffers[idx].reset();
     }
 
     // Concatenate into a single contiguous buffer.
