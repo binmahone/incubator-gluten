@@ -16,15 +16,18 @@
  */
 
 #include "GpuLock.h"
-#include <mutex>
+#include <atomic>
 #include <condition_variable>
+#include <mutex>
 #include <optional>
-#include <stdexcept>
 #include <glog/logging.h>
 
 namespace gluten {
 
 namespace {
+
+std::atomic<bool> gSemaphoreMode{false};
+
 struct GpuLockState {
   std::mutex gGpuMutex;
   std::condition_variable gGpuCv;
@@ -32,48 +35,50 @@ struct GpuLockState {
 };
 
 GpuLockState& getGpuLockState() {
-  static GpuLockState gGpuLockState;
-  return gGpuLockState;
+  static GpuLockState state;
+  return state;
 }
+
+} // namespace
+
+void setGpuSemaphoreMode(bool enabled) {
+  gSemaphoreMode.store(enabled, std::memory_order_release);
+  if (enabled) {
+    LOG(INFO) << "GpuLock disabled: concurrency managed by Java GpuSemaphore";
+  }
+}
+
+bool isGpuSemaphoreMode() {
+  return gSemaphoreMode.load(std::memory_order_acquire);
 }
 
 void lockGpu() {
-    std::thread::id tid = std::this_thread::get_id();
-    std::unique_lock<std::mutex> lock(getGpuLockState().gGpuMutex);
-    if (getGpuLockState().gGpuOwner == tid) {
-        // Reentrant call from the same thread — do nothing
-        return;
-    }
-
-
-    // Wait until the GPU lock becomes available
-    getGpuLockState().gGpuCv.wait(lock, [] {
-        return !getGpuLockState().gGpuOwner.has_value();
-    });
-
-    // Acquire ownership
-    getGpuLockState().gGpuOwner = tid;
+  if (gSemaphoreMode.load(std::memory_order_acquire)) {
+    return;
+  }
+  std::thread::id tid = std::this_thread::get_id();
+  std::unique_lock<std::mutex> lock(getGpuLockState().gGpuMutex);
+  if (getGpuLockState().gGpuOwner == tid) {
+    return;
+  }
+  getGpuLockState().gGpuCv.wait(
+      lock, [] { return !getGpuLockState().gGpuOwner.has_value(); });
+  getGpuLockState().gGpuOwner = tid;
 }
 
 void unlockGpu() {
-    std::thread::id tid = std::this_thread::get_id();
-    std::unique_lock<std::mutex> lock(getGpuLockState().gGpuMutex);
-    if (!getGpuLockState().gGpuOwner.has_value()) {
-        LOG(INFO) <<"unlockGpu() called by non-owner thread!"<< std::endl;
-        return;
-    }
-
-    if (!getGpuLockState().gGpuOwner.has_value() || getGpuLockState().gGpuOwner != tid) {
-        throw std::runtime_error("unlockGpu() called by other-owner thread!");
-    }
-
-    // Release ownership
-    getGpuLockState().gGpuOwner = std::nullopt;
-
-    // Notify one waiting thread
-    lock.unlock();
-    getGpuLockState().gGpuCv.notify_one();
+  if (gSemaphoreMode.load(std::memory_order_acquire)) {
+    return;
+  }
+  std::thread::id tid = std::this_thread::get_id();
+  std::unique_lock<std::mutex> lock(getGpuLockState().gGpuMutex);
+  if (!getGpuLockState().gGpuOwner.has_value() ||
+      getGpuLockState().gGpuOwner != tid) {
+    return;
+  }
+  getGpuLockState().gGpuOwner = std::nullopt;
+  lock.unlock();
+  getGpuLockState().gGpuCv.notify_one();
 }
-
 
 } // namespace gluten

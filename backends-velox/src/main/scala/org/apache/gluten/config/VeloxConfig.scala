@@ -767,7 +767,7 @@ object VeloxConfig extends ConfigRegistry {
     buildConf("spark.gluten.sql.columnar.backend.velox.preferredBatchBytes")
       .internal()
       .bytesConf(ByteUnit.BYTE)
-      .createWithDefaultString("10MB")
+      .createWithDefaultString("100MB")
 
   val VELOX_MAX_COMPILED_REGEXES =
     buildConf("spark.gluten.sql.columnar.backend.velox.maxCompiledRegexes")

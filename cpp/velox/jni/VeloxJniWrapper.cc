@@ -41,6 +41,7 @@
 
 #ifdef GLUTEN_ENABLE_GPU
 #include "cudf/CudfPlanValidator.h"
+#include "cudf/GpuLock.h"
 #include "cudf/GpuMemoryTracker.h"
 #include "utils/GpuBufferBatchResizer.h"
 #endif
@@ -893,6 +894,15 @@ JNIEXPORT jlong JNICALL Java_org_apache_gluten_gpu_GpuMemoryTrackerJniWrapper_cl
   }
   return tracker->clearTaskMemory(taskId);
   JNI_METHOD_END(0)
+}
+
+JNIEXPORT void JNICALL Java_org_apache_gluten_gpu_GpuMemoryTrackerJniWrapper_setGpuSemaphoreMode( // NOLINT
+    JNIEnv* env,
+    jclass,
+    jboolean enabled) {
+  JNI_METHOD_START
+  setGpuSemaphoreMode(enabled);
+  JNI_METHOD_END()
 }
 #endif
 

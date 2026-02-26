@@ -318,6 +318,13 @@ class VeloxListenerApi extends ListenerApi with Logging {
       maxConcurrentTasks,
       dynamicEnabled,
       memoryProvider)
+
+    try {
+      GpuMemoryTrackerJniWrapper.setGpuSemaphoreMode(true)
+    } catch {
+      case _: UnsatisfiedLinkError =>
+        logWarning("setGpuSemaphoreMode JNI not available, C++ GpuLock remains active")
+    }
   }
 
   private def addIfNeedMemoryDumpShutdownHook(conf: SparkConf): Unit = {

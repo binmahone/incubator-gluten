@@ -21,18 +21,16 @@
 
 namespace gluten {
 
-/**
- * @brief Acquire the GPU lock (reentrant within the same thread)
- */
-void lockGpu();
+/// Enable semaphore mode: lockGpu/unlockGpu become no-ops because
+/// concurrency is managed by the Java-side GpuSemaphore instead.
+void setGpuSemaphoreMode(bool enabled);
 
-/**
- * @brief Release the GPU lock (must be called by the owning thread)
- */
+/// Check if semaphore mode is active.
+bool isGpuSemaphoreMode();
+
+void lockGpu();
 void unlockGpu();
 
-/// RAII wrapper that acquires the GPU lock on construction and releases it on
-/// destruction, ensuring exception-safe lock management.
 class GpuLockGuard {
  public:
   GpuLockGuard() {

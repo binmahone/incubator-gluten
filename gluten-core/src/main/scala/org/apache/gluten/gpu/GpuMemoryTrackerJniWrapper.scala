@@ -41,4 +41,7 @@ object GpuMemoryTrackerJniWrapper {
 
   /** Clear tracking data for a completed task. Returns peak memory before removal. */
   @native def clearTaskMemory(taskId: Long): Long
+
+  /** Enable/disable semaphore mode in C++ GpuLock (makes lockGpu/unlockGpu no-ops). */
+  @native def setGpuSemaphoreMode(enabled: Boolean): Unit
 }
