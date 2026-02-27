@@ -19,6 +19,7 @@
 
 #include <arrow/io/api.h>
 
+#include "shuffle/CompressionThreadPool.h"
 #include "shuffle/PartitionWriter.h"
 #include "shuffle/ShuffleWriter.h"
 #include "utils/Macros.h"
@@ -130,5 +131,6 @@ class LocalPartitionWriter : public PartitionWriter {
 
   int32_t lastEvictPid_{-1};
 
+  std::unique_ptr<CompressionThreadPool> compressionPool_;
 };
 } // namespace gluten

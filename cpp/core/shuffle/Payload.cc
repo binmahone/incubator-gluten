@@ -21,7 +21,6 @@
 #include <arrow/util/bitmap.h>
 #include <arrow/util/compression.h>
 #include <iostream>
-#include <thread>
 #include <numeric>
 
 #include "shuffle/Options.h"
@@ -188,14 +187,15 @@ arrow::Result<std::unique_ptr<BlockPayload>> BlockPayload::fromBuffers(
     const std::vector<bool>* isValidityBuffer,
     arrow::MemoryPool* pool,
     arrow::util::Codec* codec,
-    int32_t compressionThreads) {
+    int32_t compressionThreads,
+    CompressionThreadPool* threadPool) {
   const uint32_t numBuffers = buffers.size();
 
   if (payloadType == Payload::Type::kCompressed) {
     Timer compressionTime;
     compressionTime.start();
 
-    const bool useParallel = compressionThreads > 1 && numBuffers > 1;
+    const bool useParallel = compressionThreads > 1 && numBuffers > 1 && threadPool != nullptr;
 
     if (!useParallel) {
       auto maxLength = maxCompressedLength(buffers, codec);
@@ -290,15 +290,15 @@ arrow::Result<std::unique_ptr<BlockPayload>> BlockPayload::fromBuffers(
           arrow::util::Codec::Create(codec->compression_type(), codec->compression_level()));
     }
 
-    // Spawn short-lived threads for parallel compression. No persistent
-    // thread pool -- eliminates all shared mutex/CV state that caused
-    // pthread assertion failures when concurrent callers (e.g. memory
-    // reclamation) submitted to the same pool simultaneously.
-    std::vector<std::thread> threads;
-    threads.reserve(numWorkers);
+    // Submit numWorkers tasks to the persistent pool. Each task processes
+    // its share of buffers using a pre-created codec. The pool's submitMutex
+    // serializes concurrent callers (main thread vs memory reclamation),
+    // and atomic spin-wait avoids stack-local mutex lifetime issues.
+    std::vector<std::function<void()>> tasks;
+    tasks.reserve(numWorkers);
     for (int32_t t = 0; t < numWorkers; t++) {
       auto* localCodec = workerCodecs[t].get();
-      threads.emplace_back(
+      tasks.emplace_back(
           [t, numWorkers, &nonTrivialIndices, &work, localCodec]() {
             for (size_t j = t; j < nonTrivialIndices.size();
                  j += static_cast<size_t>(numWorkers)) {
@@ -313,9 +313,7 @@ arrow::Result<std::unique_ptr<BlockPayload>> BlockPayload::fromBuffers(
             }
           });
     }
-    for (auto& t : threads) {
-      t.join();
-    }
+    threadPool->submitAndWait(tasks);
 
     // Compact in-place: write final data contiguously from the start.
     // Since compressed size <= max size, the write position is always <=
@@ -559,9 +557,10 @@ InMemoryPayload::toBlockPayload(
     Payload::Type payloadType,
     arrow::MemoryPool* pool,
     arrow::util::Codec* codec,
-    int32_t compressionThreads) {
+    int32_t compressionThreads,
+    CompressionThreadPool* threadPool) {
   return BlockPayload::fromBuffers(
-      payloadType, numRows_, std::move(buffers_), isValidityBuffer_, pool, codec, compressionThreads);
+      payloadType, numRows_, std::move(buffers_), isValidityBuffer_, pool, codec, compressionThreads, threadPool);
 }
 
 arrow::Status InMemoryPayload::serialize(arrow::io::OutputStream* outputStream) {

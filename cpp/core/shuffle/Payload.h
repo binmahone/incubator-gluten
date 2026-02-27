@@ -22,6 +22,7 @@
 #include <arrow/memory_pool.h>
 #include <arrow/util/compression.h>
 
+#include "shuffle/CompressionThreadPool.h"
 #include "shuffle/Dictionary.h"
 #include "shuffle/Options.h"
 #include "shuffle/Utils.h"
@@ -81,7 +82,8 @@ class BlockPayload final : public Payload {
       const std::vector<bool>* isValidityBuffer,
       arrow::MemoryPool* pool,
       arrow::util::Codec* codec,
-      int32_t compressionThreads = 1);
+      int32_t compressionThreads = 1,
+      CompressionThreadPool* threadPool = nullptr);
 
   static arrow::Result<std::vector<std::shared_ptr<arrow::Buffer>>> deserialize(
       arrow::io::InputStream* inputStream,
@@ -141,7 +143,8 @@ class InMemoryPayload final : public Payload {
       Payload::Type payloadType,
       arrow::MemoryPool* pool,
       arrow::util::Codec* codec,
-      int32_t compressionThreads = 1);
+      int32_t compressionThreads = 1,
+      CompressionThreadPool* threadPool = nullptr);
 
   arrow::Status copyBuffers(arrow::MemoryPool* pool);
 
