@@ -76,6 +76,8 @@ arrow::Result<std::shared_ptr<VeloxShuffleWriter>> VeloxGpuHashShuffleWriter::cr
     std::shared_ptr<VeloxGpuHashShuffleWriter> res =
         std::make_shared<VeloxGpuHashShuffleWriter>(numPartitions, partitionWriter, hashOptions, memoryManager);
     RETURN_NOT_OK(res->init());
+    LOG(INFO) << "VeloxGpuHashShuffleWriter created: numPartitions=" << numPartitions
+              << " gpuPartition=" << (hashOptions->gpuPartition ? "ON" : "OFF");
     return res;
   }
   return arrow::Status::Invalid("Error casting ShuffleWriterOptions to GpuHashShuffleWriterOptions. ");
@@ -83,8 +85,12 @@ arrow::Result<std::shared_ptr<VeloxShuffleWriter>> VeloxGpuHashShuffleWriter::cr
 
 arrow::Status VeloxGpuHashShuffleWriter::write(std::shared_ptr<ColumnarBatch> cb, int64_t memLimit) {
   if (!gpuPartitionEnabled_ ||
-      partitioning_ == Partitioning::kSingle ||
-      partitioning_ == Partitioning::kRange) {
+      partitioning_ == Partitioning::kSingle) {
+    if (!gpuPartitionDiagLogged_) {
+      gpuPartitionDiagLogged_ = true;
+      LOG(WARNING) << "GPU partition DISABLED: gpuPartitionEnabled_=" << gpuPartitionEnabled_
+                   << " partitioning=" << static_cast<int>(partitioning_);
+    }
     return VeloxHashShuffleWriter::write(cb, memLimit);
   }
 
@@ -94,11 +100,22 @@ arrow::Status VeloxGpuHashShuffleWriter::write(std::shared_ptr<ColumnarBatch> cb
     if (veloxBatch) {
       auto rv = veloxBatch->getRowVector();
       auto cudfVec = std::dynamic_pointer_cast<CudfVector>(rv);
+      if (!gpuPartitionDiagLogged_) {
+        gpuPartitionDiagLogged_ = true;
+        LOG(INFO) << "GPU partition diag: batchType=" << cb->getType()
+                  << " veloxBatch=" << (veloxBatch != nullptr)
+                  << " rvType=" << (rv ? rv->type()->toString() : "null")
+                  << " rvTypeName=" << (rv ? typeid(*rv).name() : "null")
+                  << " isCudfVector=" << (cudfVec != nullptr)
+                  << " numRows=" << cb->numRows();
+      }
       if (cudfVec) {
         // First batch: D2H and run through CPU path to initialize schema metadata.
         // Then flush partition buffers so subsequent GPU-path evicts don't reorder.
         if (!gpuSchemaInitialized_) {
           gpuSchemaInitialized_ = true;
+          LOG(INFO) << "GPU partition: first CudfVector batch, rows=" << cudfVec->size()
+                    << " cols=" << cudfVec->getTableView().num_columns();
           auto cpuRv = cudf_velox::with_arrow::toVeloxColumn(
               cudfVec->getTableView(), veloxPool_.get(), std::string(""), cudfVec->stream());
           cudfVec->stream().synchronize();
@@ -123,6 +140,12 @@ arrow::Status VeloxGpuHashShuffleWriter::write(std::shared_ptr<ColumnarBatch> cb
         return gpuPartitionAndEvict(cudfVec);
       }
     }
+  } else {
+    if (!gpuPartitionDiagLogged_) {
+      gpuPartitionDiagLogged_ = true;
+      LOG(WARNING) << "GPU partition fallback: batchType=" << cb->getType()
+                   << " (not 'velox'), falling back to CPU path";
+    }
   }
 
   return VeloxHashShuffleWriter::write(cb, memLimit);
@@ -133,10 +156,10 @@ arrow::Status VeloxGpuHashShuffleWriter::gpuPartitionAndEvict(
   auto tableView = cudfVec->getTableView();
   auto stream = cudfVec->stream();
 
-  // First column is pre-computed hash values from Spark.
-  auto hashCol = tableView.column(0);
+  // First column carries partition info (hash value for kHash, PID for kRange).
+  auto firstCol = tableView.column(0);
 
-  // Strip hash column to get data-only table view.
+  // Strip first column to get data-only table view.
   std::vector<cudf::column_view> dataCols;
   dataCols.reserve(tableView.num_columns() - 1);
   for (cudf::size_type i = 1; i < tableView.num_columns(); ++i) {
@@ -144,19 +167,28 @@ arrow::Status VeloxGpuHashShuffleWriter::gpuPartitionAndEvict(
   }
   cudf::table_view dataTable(dataCols);
 
-  // Compute partition IDs on GPU: hash % numPartitions.
-  auto numPartScalar = cudf::numeric_scalar<int32_t>(
-      static_cast<int32_t>(numPartitions_), true, stream);
-  auto pidCol = cudf::binary_operation(
-      hashCol,
-      numPartScalar,
-      cudf::binary_operator::PYMOD,
-      cudf::data_type{cudf::type_id::INT32},
-      stream);
+  // Compute partition IDs on GPU.
+  // kHash: first col is hash value → pid = hash % numPartitions
+  // kRange: first col is already the partition ID → use directly
+  std::unique_ptr<cudf::column> pidColOwned;
+  cudf::column_view pidColView;
+  if (partitioning_ == Partitioning::kHash) {
+    auto numPartScalar = cudf::numeric_scalar<int32_t>(
+        static_cast<int32_t>(numPartitions_), true, stream);
+    pidColOwned = cudf::binary_operation(
+        firstCol,
+        numPartScalar,
+        cudf::binary_operator::PYMOD,
+        cudf::data_type{cudf::type_id::INT32},
+        stream);
+    pidColView = pidColOwned->view();
+  } else {
+    pidColView = firstCol;
+  }
 
   // cudf::partition() reorders rows by PID and returns boundary offsets.
   auto [partitionedTable, offsets] = cudf::partition(
-      dataTable, pidCol->view(), static_cast<cudf::size_type>(numPartitions_), stream);
+      dataTable, pidColView, static_cast<cudf::size_type>(numPartitions_), stream);
   VELOX_CHECK_EQ(offsets.size(), numPartitions_ + 1);
 
   // Single D2H: convert the entire partitioned table to a Velox RowVector.
