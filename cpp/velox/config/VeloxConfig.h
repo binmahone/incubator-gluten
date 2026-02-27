@@ -204,6 +204,16 @@ const std::string kCudfHiveConnectorId = "cudf-hive";
 const std::string kCudfGpuTargetBatchRows = "spark.gluten.sql.columnar.backend.velox.cudf.gpuTargetBatchRows";
 const std::string kCudfGpuTargetBatchRowsDefault = "1000000";
 
+// Pinned host memory pool size in bytes for fast HtoD/DtoH PCIe transfers.
+// Default "0" uses cudf's default (0.5% of device memory, capped at 64 MB).
+const std::string kCudfPinnedPoolSize = "spark.gluten.sql.columnar.backend.velox.cudf.pinnedPoolSize";
+const std::string kCudfPinnedPoolSizeDefault = "0";
+
+// Host allocations <= this threshold use pinned memory from the pool.
+// Default "0" disables (all host allocations use pageable memory).
+const std::string kCudfHostAsPinnedThreshold = "spark.gluten.sql.columnar.backend.velox.cudf.hostAsPinnedThreshold";
+const std::string kCudfHostAsPinnedThresholdDefault = "0";
+
 const std::string kStaticBackendConfPrefix = "spark.gluten.velox.";
 const std::string kDynamicBackendConfPrefix = "spark.gluten.sql.columnar.backend.velox.";
 

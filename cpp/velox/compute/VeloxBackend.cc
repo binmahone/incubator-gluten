@@ -179,7 +179,11 @@ void VeloxBackend::init(
         {velox::cudf_velox::CudfConfig::kCudfMemoryPercent,
          backendConf_->get(kCudfMemoryPercent, kCudfMemoryPercentDefault)},
         {velox::cudf_velox::CudfConfig::kCudfGpuTargetBatchRows,
-         backendConf_->get(kCudfGpuTargetBatchRows, kCudfGpuTargetBatchRowsDefault)}};
+         backendConf_->get(kCudfGpuTargetBatchRows, kCudfGpuTargetBatchRowsDefault)},
+        {velox::cudf_velox::CudfConfig::kCudfPinnedPoolSize,
+         backendConf_->get(kCudfPinnedPoolSize, kCudfPinnedPoolSizeDefault)},
+        {velox::cudf_velox::CudfConfig::kCudfHostAsPinnedThreshold,
+         backendConf_->get(kCudfHostAsPinnedThreshold, kCudfHostAsPinnedThresholdDefault)}};
     auto& cudfConfig = velox::cudf_velox::CudfConfig::getInstance();
     cudfConfig.initialize(std::move(options));
     velox::cudf_velox::registerCudf();
