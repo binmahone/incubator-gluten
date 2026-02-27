@@ -15,7 +15,6 @@
  * limitations under the License.
  */
 
-#include "shuffle/CompressionThreadPool.h"
 #include "shuffle/Payload.h"
 
 #include <arrow/buffer.h>
@@ -36,7 +35,6 @@ class ParallelCompressionTest : public ::testing::Test {
     auto codecResult = arrow::util::Codec::Create(arrow::Compression::LZ4_FRAME);
     ASSERT_TRUE(codecResult.ok());
     codec_ = std::move(*codecResult);
-    threadPool_ = std::make_unique<CompressionThreadPool>(4);
   }
 
   std::shared_ptr<arrow::Buffer> makeRandomBuffer(int64_t size, uint32_t seed = 42) {
@@ -79,7 +77,6 @@ class ParallelCompressionTest : public ::testing::Test {
 
   arrow::MemoryPool* pool_;
   std::unique_ptr<arrow::util::Codec> codec_;
-  std::unique_ptr<CompressionThreadPool> threadPool_;
 };
 
 TEST_F(ParallelCompressionTest, SingleThreadBaseline) {
@@ -121,9 +118,9 @@ TEST_F(ParallelCompressionTest, ParallelProducesSameResult) {
   ASSERT_TRUE(result1.ok());
   auto payload1 = std::move(*result1);
 
-  // Compress with 4 threads using persistent pool.
+  // Compress with 4 threads.
   auto result2 = BlockPayload::fromBuffers(
-      Payload::kCompressed, 200, std::move(buffers2), &isValidity, pool_, codec_.get(), 4, threadPool_.get());
+      Payload::kCompressed, 200, std::move(buffers2), &isValidity, pool_, codec_.get(), 4);
   ASSERT_TRUE(result2.ok());
   auto payload2 = std::move(*result2);
 
@@ -146,7 +143,7 @@ TEST_F(ParallelCompressionTest, ParallelWithNullAndEmptyBuffers) {
   buffers.push_back(makeCompressibleBuffer(32 * 1024, 4));
 
   auto result = BlockPayload::fromBuffers(
-      Payload::kCompressed, 50, std::move(buffers), &isValidity, pool_, codec_.get(), 3, threadPool_.get());
+      Payload::kCompressed, 50, std::move(buffers), &isValidity, pool_, codec_.get(), 3);
   ASSERT_TRUE(result.ok());
   auto payload = std::move(*result);
   ASSERT_NE(payload, nullptr);
@@ -159,7 +156,7 @@ TEST_F(ParallelCompressionTest, ParallelWithSingleBuffer) {
   buffers.push_back(makeCompressibleBuffer(64 * 1024, 0));
 
   auto result = BlockPayload::fromBuffers(
-      Payload::kCompressed, 10, std::move(buffers), &isValidity, pool_, codec_.get(), 4, threadPool_.get());
+      Payload::kCompressed, 10, std::move(buffers), &isValidity, pool_, codec_.get(), 4);
   ASSERT_TRUE(result.ok());
   auto payload = std::move(*result);
   ASSERT_NE(payload, nullptr);
@@ -172,7 +169,7 @@ TEST_F(ParallelCompressionTest, UncompressedBypassesParallel) {
   buffers.push_back(makeRandomBuffer(2048, 1));
 
   auto result = BlockPayload::fromBuffers(
-      Payload::kUncompressed, 10, std::move(buffers), &isValidity, pool_, codec_.get(), 4, threadPool_.get());
+      Payload::kUncompressed, 10, std::move(buffers), &isValidity, pool_, codec_.get(), 4);
   ASSERT_TRUE(result.ok());
   auto payload = std::move(*result);
   EXPECT_EQ(payload->type(), Payload::kUncompressed);
@@ -194,7 +191,7 @@ TEST_F(ParallelCompressionTest, ParallelDeserializationRoundTrip) {
 
   // Compress with parallel threads.
   auto compressResult = BlockPayload::fromBuffers(
-      Payload::kCompressed, 300, std::move(buffers), &isValidity, pool_, codec_.get(), 3, threadPool_.get());
+      Payload::kCompressed, 300, std::move(buffers), &isValidity, pool_, codec_.get(), 3);
   ASSERT_TRUE(compressResult.ok());
   auto payload = std::move(*compressResult);
 
@@ -236,9 +233,8 @@ TEST_F(ParallelCompressionTest, ParallelWithManyThreads) {
     buffers.push_back(makeCompressibleBuffer(32 * 1024, i));
   }
 
-  CompressionThreadPool pool8(8);
   auto result = BlockPayload::fromBuffers(
-      Payload::kCompressed, 500, std::move(buffers), &isValidity, pool_, codec_.get(), 8, &pool8);
+      Payload::kCompressed, 500, std::move(buffers), &isValidity, pool_, codec_.get(), 8);
   ASSERT_TRUE(result.ok());
   auto payload = std::move(*result);
   ASSERT_NE(payload, nullptr);
@@ -269,7 +265,7 @@ TEST_F(ParallelCompressionTest, ParallelWithZstdCodec) {
   auto payload1 = std::move(*result1);
 
   auto result2 = BlockPayload::fromBuffers(
-      Payload::kCompressed, 100, std::move(buffers2), &isValidity, pool_, zstdCodec.get(), 4, threadPool_.get());
+      Payload::kCompressed, 100, std::move(buffers2), &isValidity, pool_, zstdCodec.get(), 4);
   ASSERT_TRUE(result2.ok());
   auto payload2 = std::move(*result2);
 
