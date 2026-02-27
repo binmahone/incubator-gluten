@@ -1074,10 +1074,11 @@ object GlutenConfig extends ConfigRegistry {
 
   val SHUFFLE_COMPRESSION_THREADS =
     buildConf("spark.gluten.sql.columnar.shuffle.compression.threads")
-      .doc("Number of threads for parallel shuffle compression. " +
-        "Column buffers within a batch are compressed concurrently. " +
-        "1 means single-threaded (default). " +
-        "Higher values use more CPU cores to reduce compression latency.")
+      .doc(
+        "Number of threads for parallel shuffle compression. " +
+          "Column buffers within a batch are compressed concurrently. " +
+          "1 means single-threaded (default). " +
+          "Higher values use more CPU cores to reduce compression latency.")
       .intConf
       .checkValue(_ >= 1, "Compression threads must be at least 1")
       .createWithDefault(1)
