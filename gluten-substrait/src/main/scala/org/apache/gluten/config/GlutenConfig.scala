@@ -148,6 +148,9 @@ class GlutenConfig(conf: SQLConf) extends GlutenCoreConfig(conf) {
 
   def enableColumnarCudf: Boolean = getConf(COLUMNAR_CUDF_ENABLED)
 
+  def enableCudfGpuPartition: Boolean =
+    enableColumnarCudf && getConf(COLUMNAR_CUDF_GPU_PARTITION)
+
   def enableExtendedColumnPruning: Boolean =
     getConf(ENABLE_EXTENDED_COLUMN_PRUNING)
 
@@ -1581,6 +1584,14 @@ object GlutenConfig extends ConfigRegistry {
     buildConf("spark.gluten.sql.columnar.cudf")
       .experimental()
       .doc("Enable or disable cudf support. This is an experimental feature.")
+      .booleanConf
+      .createWithDefault(false)
+
+  val COLUMNAR_CUDF_GPU_PARTITION =
+    buildConf("spark.gluten.sql.columnar.cudf.gpuPartition")
+      .experimental()
+      .doc("When cudf is enabled, perform shuffle partitioning on GPU instead of CPU. " +
+        "Moves hash-mod and data reordering to GPU, then does a single D2H transfer.")
       .booleanConf
       .createWithDefault(false)
 

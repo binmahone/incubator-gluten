@@ -218,14 +218,21 @@ class VeloxHashShuffleWriter : public VeloxShuffleWriter {
     arenas_.resize(numPartitions);
   }
 
+ protected:
+  arrow::Status initFromRowVector(const facebook::velox::RowVector& rv);
+
+  arrow::Status evictBuffers(
+      uint32_t partitionId,
+      uint32_t numRows,
+      std::vector<std::shared_ptr<arrow::Buffer>> buffers,
+      bool reuseBuffers);
+
  private:
   arrow::Status initPartitions();
 
   arrow::Status initColumnTypes(const facebook::velox::RowVector& rv);
 
   arrow::Status splitRowVector(const facebook::velox::RowVector& rv);
-
-  arrow::Status initFromRowVector(const facebook::velox::RowVector& rv);
 
   arrow::Status buildPartition2Row(uint32_t rowNum);
 
@@ -255,12 +262,6 @@ class VeloxHashShuffleWriter : public VeloxShuffleWriter {
   arrow::Status splitBinaryArray(const facebook::velox::RowVector& rv);
 
   arrow::Status splitComplexType(const facebook::velox::RowVector& rv);
-
-  arrow::Status evictBuffers(
-      uint32_t partitionId,
-      uint32_t numRows,
-      std::vector<std::shared_ptr<arrow::Buffer>> buffers,
-      bool reuseBuffers);
 
   arrow::Result<std::vector<std::shared_ptr<arrow::Buffer>>> assembleBuffers(uint32_t partitionId, bool reuseBuffers);
 

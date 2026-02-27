@@ -98,4 +98,44 @@ class GpuBufferBatchResizeForShuffleInputOutputSuite extends VeloxWholeStageTran
         spark.sql("select l_orderkey, l_partkey, l_quantity from lineitem where l_quantity > 30"))
     }
   }
+
+  test("GPU partition shuffle produces correct join results") {
+    withSQLConf(
+      "spark.sql.autoBroadcastJoinThreshold" -> "-1",
+      "spark.sql.adaptive.enabled" -> "false",
+      GlutenConfig.COLUMNAR_FORCE_SHUFFLED_HASH_JOIN_ENABLED.key -> "true",
+      GlutenConfig.COLUMNAR_CUDF_GPU_PARTITION.key -> "true"
+    ) {
+      createTPCHNotNullTables()
+      val sql = """select l_orderkey, l_linenumber, o_orderstatus
+                  |from lineitem join orders
+                  |on l_orderkey = o_orderkey
+                  |where l_linenumber <= 2""".stripMargin
+      val df = spark.sql(sql)
+
+      val plan = df.queryExecution.executedPlan
+      val gpuShuffles = plan.collect { case e: GPUColumnarShuffleExchangeExec => e }
+      assert(gpuShuffles.nonEmpty, "Expected GPUColumnarShuffleExchangeExec")
+
+      checkAnswer(df, spark.sql(sql))
+    }
+  }
+
+  test("GPU partition shuffle produces correct aggregation results") {
+    withSQLConf(
+      "spark.sql.autoBroadcastJoinThreshold" -> "-1",
+      "spark.sql.adaptive.enabled" -> "false",
+      GlutenConfig.COLUMNAR_CUDF_GPU_PARTITION.key -> "true"
+    ) {
+      createTPCHNotNullTables()
+      val sql = """select l_returnflag, l_linestatus,
+                  |       sum(cast(l_linenumber as bigint)) as sum_lines,
+                  |       count(*) as count_order
+                  |from lineitem
+                  |group by l_returnflag, l_linestatus
+                  |order by l_returnflag, l_linestatus""".stripMargin
+      val df = spark.sql(sql)
+      checkAnswer(df, spark.sql(sql))
+    }
+  }
 }

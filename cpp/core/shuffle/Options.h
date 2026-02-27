@@ -148,6 +148,7 @@ struct RssSortShuffleWriterOptions : ShuffleWriterOptions {
 struct GpuHashShuffleWriterOptions : HashShuffleWriterOptions {
   int32_t splitBufferSize = kDefaultShuffleWriterBufferSize;
   double splitBufferReallocThreshold = kDefaultSplitBufferReallocThreshold;
+  bool gpuPartition = false;
 
   GpuHashShuffleWriterOptions() : HashShuffleWriterOptions(ShuffleWriterType::kGpuHashShuffle) {}
 
@@ -155,13 +156,15 @@ struct GpuHashShuffleWriterOptions : HashShuffleWriterOptions {
       Partitioning partitioning,
       int32_t startPartitionId,
       int32_t partitionBufferSize,
-      double partitionBufferReallocThreshold)
+      double partitionBufferReallocThreshold,
+      bool gpuPartition = false)
       : HashShuffleWriterOptions(
             ShuffleWriterType::kGpuHashShuffle,
             partitioning,
             startPartitionId,
             partitionBufferSize,
-            partitionBufferReallocThreshold) {}
+            partitionBufferReallocThreshold),
+        gpuPartition(gpuPartition) {}
 };
 
 struct LocalPartitionWriterOptions {

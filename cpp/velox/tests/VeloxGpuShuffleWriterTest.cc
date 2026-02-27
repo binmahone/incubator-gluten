@@ -29,9 +29,14 @@
 #include "memory/GpuBufferColumnarBatch.h"
 #include "utils/GpuBufferBatchResizer.h"
 
+#include "velox/experimental/cudf/exec/Utilities.h"
 #include "velox/experimental/cudf/exec/VeloxCudfInterop.h"
 #include "velox/experimental/cudf/vector/CudfVector.h"
 #include "velox/vector/tests/utils/VectorTestBase.h"
+
+#include <chrono>
+#include <iomanip>
+#include <numeric>
 
 using namespace facebook::velox;
 
@@ -712,6 +717,289 @@ TEST_P(GpuRoundRobinPartitioningShuffleWriterTest, spillVerifyResult) {
   // Stop and verify.
   shuffleWriteReadMultiBlocks(*shuffleWriter, 2, {blockPid1, blockPid2});
 }
+
+// ─── GPU Partition tests: CudfVector input with gpuPartition=true ───
+
+class GpuPartitionHashShuffleWriterTest : public GpuVeloxShuffleWriterTest {
+ protected:
+  void SetUp() override {
+    GpuVeloxShuffleWriterTest::SetUp();
+    // Same hash vectors as GpuHashPartitioningShuffleWriterTest.
+    children1_.insert(children1_.begin(), makeFlatVector<int32_t>({1, 2, 2, 2, 2, 1, 1, 1, 2, 1}));
+    hashInputVector1_ = makeRowVector(children1_);
+    children2_.insert(children2_.begin(), makeFlatVector<int32_t>({2, 2}));
+    hashInputVector2_ = makeRowVector(children2_);
+  }
+
+  std::shared_ptr<ShuffleWriterOptions> defaultShuffleWriterOptions() override {
+    auto opts = std::make_shared<GpuHashShuffleWriterOptions>();
+    opts->partitioning = Partitioning::kHash;
+    opts->splitBufferSize = 4;
+    opts->gpuPartition = true;
+    return opts;
+  }
+
+  std::shared_ptr<ColumnarBatch> toCudfBatch(const RowVectorPtr& rv) {
+    auto stream = cudf_velox::cudfGlobalStreamPool().get_stream();
+    auto table = cudf_velox::with_arrow::toCudfTable(rv, pool(), stream);
+    stream.synchronize();
+    auto cudfVec = std::make_shared<cudf_velox::CudfVector>(
+        pool(), rv->type(), rv->size(), std::move(table), stream);
+    return std::make_shared<VeloxColumnarBatch>(cudfVec, rv->type()->size());
+  }
+
+  RowVectorPtr hashInputVector1_;
+  RowVectorPtr hashInputVector2_;
+};
+
+TEST_P(GpuPartitionHashShuffleWriterTest, gpuPartitionFixedWidth) {
+  auto shuffleWriter = createShuffleWriter(2);
+
+  std::vector<VectorPtr> data = {
+      makeNullableFlatVector<int8_t>({1, 2, 3, std::nullopt}),
+      makeNullableFlatVector<int16_t>({1, 2, 3, 4}),
+      makeFlatVector<int64_t>({1, 2, 3, 4}),
+      makeFlatVector<int64_t>({232, 34567235, 1212, 4567}),
+      makeFlatVector<int32_t>({232, 34567235, 1212, 4567}),
+      makeFlatVector<int32_t>(
+          4, [](vector_size_t row) { return row % 2; }, nullEvery(5), DATE()),
+      makeFlatVector<Timestamp>(4, [](vector_size_t row) { return Timestamp{row % 2, 0}; }, nullEvery(5))};
+
+  const auto vector = makeRowVector(data);
+  const auto blocksPid0 = takeRows({vector}, {{1, 3}});
+  const auto blocksPid1 = takeRows({vector}, {{0, 2}});
+
+  data.insert(data.begin(), makeFlatVector<int32_t>({1, 2, 1, 2}));
+  const auto input = makeRowVector(data);
+
+  auto cudfBatch = toCudfBatch(input);
+  testShuffleRoundTrip(*shuffleWriter, {cudfBatch}, 2, {blocksPid0, blocksPid1});
+}
+
+TEST_P(GpuPartitionHashShuffleWriterTest, gpuPartitionVariableWidth) {
+  auto shuffleWriter = createShuffleWriter(2);
+
+  std::vector<VectorPtr> data = {
+      makeFlatVector<StringView>({"nn", "", "fr", "juiu"}),
+      makeNullableFlatVector<int8_t>({1, 2, 3, std::nullopt}),
+      makeNullableFlatVector<StringView>({std::nullopt, "de", "10 I'm not inline string", "de"})};
+
+  const auto vector = makeRowVector(data);
+  const auto blocksPid0 = takeRows({vector}, {{0, 1, 3}});
+  const auto blocksPid1 = takeRows({vector}, {{2}});
+
+  data.insert(data.begin(), makeFlatVector<int32_t>({2, 2, 1, 2}));
+  const auto input = makeRowVector(data);
+
+  auto cudfBatch = toCudfBatch(input);
+  testShuffleRoundTrip(*shuffleWriter, {cudfBatch}, 2, {blocksPid0, blocksPid1});
+}
+
+TEST_P(GpuPartitionHashShuffleWriterTest, gpuPartition3Batches) {
+  auto shuffleWriter = createShuffleWriter(2);
+
+  auto blockPid2 = takeRows({inputVector1_, inputVector2_, inputVector1_}, {{1, 2, 3, 4, 8}, {0, 1}, {1, 2, 3, 4, 8}});
+  auto blockPid1 = takeRows({inputVector1_, inputVector1_}, {{0, 5, 6, 7, 9}, {0, 5, 6, 7, 9}});
+
+  auto b1 = toCudfBatch(hashInputVector1_);
+  auto b2 = toCudfBatch(hashInputVector2_);
+  auto b3 = toCudfBatch(hashInputVector1_);
+
+  testShuffleRoundTrip(*shuffleWriter, {b1, b2, b3}, 2, {blockPid2, blockPid1});
+}
+
+TEST_P(GpuPartitionHashShuffleWriterTest, gpuPartitionFallbackNonCudf) {
+  // CPU RowVector input should still work (fallback to CPU path).
+  auto shuffleWriter = createShuffleWriter(2);
+
+  auto blockPid2 = takeRows({inputVector1_, inputVector2_}, {{1, 2, 3, 4, 8}, {0, 1}});
+  auto blockPid1 = takeRows({inputVector1_}, {{0, 5, 6, 7, 9}});
+
+  testShuffleRoundTrip(*shuffleWriter, {hashInputVector1_, hashInputVector2_}, 2, {blockPid2, blockPid1});
+}
+
+INSTANTIATE_TEST_SUITE_P(
+    GpuPartitionHashShuffleWriterGroup,
+    GpuPartitionHashShuffleWriterTest,
+    ::testing::ValuesIn(getTestParams()));
+
+// ─── Benchmark: GPU vs CPU shuffle partition ───
+
+class GpuShufflePartitionBenchmark : public GpuVeloxShuffleWriterTest {
+ protected:
+  std::shared_ptr<ShuffleWriterOptions> defaultShuffleWriterOptions() override {
+    auto opts = std::make_shared<GpuHashShuffleWriterOptions>();
+    opts->partitioning = Partitioning::kHash;
+    opts->splitBufferSize = 4096;
+    return opts;
+  }
+
+  std::shared_ptr<ShuffleWriterOptions> gpuPartitionOptions() {
+    auto opts = std::make_shared<GpuHashShuffleWriterOptions>();
+    opts->partitioning = Partitioning::kHash;
+    opts->splitBufferSize = 4096;
+    opts->gpuPartition = true;
+    return opts;
+  }
+
+  RowVectorPtr buildBenchData(int32_t numRows, int32_t numPartitions) {
+    std::vector<VectorPtr> data;
+    // Hash column: uniformly distribute rows to partitions.
+    std::vector<int32_t> hashVals(numRows);
+    for (int32_t i = 0; i < numRows; ++i) {
+      hashVals[i] = i % numPartitions;
+    }
+    data.push_back(makeFlatVector<int32_t>(hashVals));
+
+    // Fixed-width columns.
+    std::vector<int64_t> col64(numRows);
+    std::iota(col64.begin(), col64.end(), 0);
+    data.push_back(makeFlatVector<int64_t>(col64));
+
+    std::vector<int32_t> col32(numRows);
+    std::iota(col32.begin(), col32.end(), 0);
+    data.push_back(makeFlatVector<int32_t>(col32));
+
+    std::vector<double> colDbl(numRows);
+    for (int32_t i = 0; i < numRows; ++i) colDbl[i] = i * 0.1;
+    data.push_back(makeFlatVector<double>(colDbl));
+
+    // String column with short strings.
+    std::vector<std::string> colStrStorage(numRows);
+    for (int32_t i = 0; i < numRows; ++i) {
+      colStrStorage[i] = "row_" + std::to_string(i);
+    }
+    std::vector<StringView> colStr(numRows);
+    for (int32_t i = 0; i < numRows; ++i) {
+      colStr[i] = StringView(colStrStorage[i]);
+    }
+    data.push_back(makeFlatVector<StringView>(colStr));
+
+    return makeRowVector(data);
+  }
+
+  std::shared_ptr<ColumnarBatch> toCudfBatch(const RowVectorPtr& rv) {
+    auto stream = cudf_velox::cudfGlobalStreamPool().get_stream();
+    auto table = cudf_velox::with_arrow::toCudfTable(rv, pool(), stream);
+    stream.synchronize();
+    auto cudfVec = std::make_shared<cudf_velox::CudfVector>(
+        pool(), rv->type(), rv->size(), std::move(table), stream);
+    return std::make_shared<VeloxColumnarBatch>(cudfVec, rv->type()->size());
+  }
+};
+
+TEST_P(GpuShufflePartitionBenchmark, benchCpuVsGpu) {
+  const int32_t numRows = 2000000;
+  const int32_t numPartitions = 200;
+  const int32_t warmup = 2;
+  const int32_t iterations = 5;
+
+  auto benchData = buildBenchData(numRows, numPartitions);
+
+  // Build CudfVector (data on GPU) — the common starting point for both paths.
+  auto stream = cudf_velox::cudfGlobalStreamPool().get_stream();
+  auto gpuTable = cudf_velox::with_arrow::toCudfTable(benchData, pool(), stream);
+  stream.synchronize();
+  auto cudfVec = std::make_shared<cudf_velox::CudfVector>(
+      pool(), benchData->type(), benchData->size(), std::move(gpuTable), stream);
+
+  auto printStats = [](const std::string& label, const std::vector<double>& v, int32_t numRows, int32_t numParts) {
+    double sum = 0;
+    for (auto x : v) sum += x;
+    double avg = sum / v.size();
+    auto s = v;
+    std::sort(s.begin(), s.end());
+    std::cout << "[Benchmark] " << label
+              << ":  avg=" << std::fixed << std::setprecision(2) << avg << "ms"
+              << " [" << s.front() << " ~ " << s.back() << "]"
+              << "  (" << numRows << " rows, " << numParts << " partitions)" << std::endl;
+  };
+
+  // ── CPU path: CudfVector → D2H → CPU scatter ──
+  // This is what happens in production when gpuPartition is OFF:
+  //   cudf op → CudfVector → VeloxColumnarBatch::from() → toVeloxColumn (D2H) → CPU split
+  {
+    std::vector<double> d2hTimings, writeTimings, totalTimings;
+    for (int32_t i = 0; i < warmup + iterations; ++i) {
+      GLUTEN_THROW_NOT_OK(setLocalDirsAndDataFile());
+      const auto& params = GetParam();
+      auto partitionWriter = createPartitionWriter(
+          params.partitionWriterType, numPartitions, dataFile_, localDirs_,
+          arrow::Compression::UNCOMPRESSED, 0, 0, false);
+      GLUTEN_ASSIGN_OR_THROW(
+          auto shuffleWriter,
+          VeloxShuffleWriter::create(
+              params.shuffleWriterType, numPartitions, partitionWriter,
+              defaultShuffleWriterOptions(), getDefaultMemoryManager()));
+
+      // Step 1: D2H — simulate what VeloxColumnarBatch::from() does for CudfVector
+      auto t0 = std::chrono::high_resolution_clock::now();
+      auto cpuRv = cudf_velox::with_arrow::toVeloxColumn(
+          cudfVec->getTableView(), pool(), std::string(""), cudfVec->stream());
+      cudfVec->stream().synchronize();
+      auto t1 = std::chrono::high_resolution_clock::now();
+
+      // Step 2: CPU scatter
+      auto cpuBatch = std::make_shared<VeloxColumnarBatch>(cpuRv);
+      ASSERT_NOT_OK(shuffleWriter->write(cpuBatch, ShuffleWriter::kMinMemLimit));
+      auto t2 = std::chrono::high_resolution_clock::now();
+      ASSERT_NOT_OK(shuffleWriter->stop());
+      auto t3 = std::chrono::high_resolution_clock::now();
+
+      if (i >= warmup) {
+        d2hTimings.push_back(std::chrono::duration<double, std::milli>(t1 - t0).count());
+        writeTimings.push_back(std::chrono::duration<double, std::milli>(t2 - t1).count());
+        totalTimings.push_back(std::chrono::duration<double, std::milli>(t3 - t0).count());
+      }
+    }
+    printStats("CPU path  D2H      ", d2hTimings, numRows, numPartitions);
+    printStats("CPU path  write    ", writeTimings, numRows, numPartitions);
+    printStats("CPU path  total    ", totalTimings, numRows, numPartitions);
+  }
+
+  // ── GPU path: CudfVector → GPU partition → per-partition D2H ──
+  {
+    std::vector<double> writeTimings, totalTimings;
+    for (int32_t i = 0; i < warmup + iterations; ++i) {
+      GLUTEN_THROW_NOT_OK(setLocalDirsAndDataFile());
+      const auto& params = GetParam();
+      auto partitionWriter = createPartitionWriter(
+          params.partitionWriterType, numPartitions, dataFile_, localDirs_,
+          arrow::Compression::UNCOMPRESSED, 0, 0, false);
+      GLUTEN_ASSIGN_OR_THROW(
+          auto shuffleWriter,
+          VeloxShuffleWriter::create(
+              params.shuffleWriterType, numPartitions, partitionWriter,
+              gpuPartitionOptions(), getDefaultMemoryManager()));
+
+      auto cudfBatch = std::make_shared<VeloxColumnarBatch>(cudfVec, cudfVec->type()->size());
+      auto t0 = std::chrono::high_resolution_clock::now();
+      ASSERT_NOT_OK(shuffleWriter->write(cudfBatch, ShuffleWriter::kMinMemLimit));
+      auto t1 = std::chrono::high_resolution_clock::now();
+      ASSERT_NOT_OK(shuffleWriter->stop());
+      auto t2 = std::chrono::high_resolution_clock::now();
+
+      if (i >= warmup) {
+        writeTimings.push_back(std::chrono::duration<double, std::milli>(t1 - t0).count());
+        totalTimings.push_back(std::chrono::duration<double, std::milli>(t2 - t0).count());
+      }
+    }
+    printStats("GPU path  write    ", writeTimings, numRows, numPartitions);
+    printStats("GPU path  total    ", totalTimings, numRows, numPartitions);
+  }
+
+  std::cout << std::endl;
+  std::cout << "[Note] CPU path = D2H(full batch) + CPU scatter" << std::endl;
+  std::cout << "[Note] GPU path = GPU partition + 1x D2H(full partitioned table) + CPU extract buffers" << std::endl;
+}
+
+INSTANTIATE_TEST_SUITE_P(
+    GpuShufflePartitionBenchmarkGroup,
+    GpuShufflePartitionBenchmark,
+    ::testing::Values(GpuShuffleTestParams{
+        .shuffleWriterType = ShuffleWriterType::kGpuHashShuffle,
+        .partitionWriterType = PartitionWriterType::kLocal,
+        .compressionType = arrow::Compression::UNCOMPRESSED}));
 
 INSTANTIATE_TEST_SUITE_P(
     SinglePartitioningShuffleWriterGroup,

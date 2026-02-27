@@ -36,10 +36,14 @@ case class GpuBufferBatchResizeForShuffleInputOutput() extends Rule[SparkPlan] {
     val range = VeloxConfig.get.veloxResizeBatchesShuffleInputOutputRange
     val preferredBatchBytes = VeloxConfig.get.veloxPreferredBatchBytes
     val batchSize = VeloxConfig.get.cudfBatchSize
+    val cudfEnabled = VeloxConfig.get.enableColumnarCudf
     plan.transformUp {
+      // Skip write-side resize when cudf is enabled: VeloxBatchResizer cannot
+      // merge/split CudfVector (empty children). CudfVector batches are already
+      // large enough and go directly to the GPU shuffle writer.
       case shuffle: ColumnarShuffleExchangeExec
           if shuffle.shuffleWriterType == HashShuffleWriterType &&
-            VeloxConfig.get.veloxResizeBatchesShuffleInput =>
+            VeloxConfig.get.veloxResizeBatchesShuffleInput && !cudfEnabled =>
         val appendBatches =
           VeloxResizeBatchesExec(shuffle.child, range.min, range.max, preferredBatchBytes)
         shuffle.withNewChildren(Seq(appendBatches))

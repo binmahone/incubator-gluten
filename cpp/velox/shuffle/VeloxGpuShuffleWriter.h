@@ -19,6 +19,10 @@
 
 #include "VeloxHashShuffleWriter.h"
 
+namespace facebook::velox::cudf_velox {
+class CudfVector;
+}
+
 namespace gluten {
 
 class VeloxGpuHashShuffleWriter : public VeloxHashShuffleWriter {
@@ -34,10 +38,12 @@ class VeloxGpuHashShuffleWriter : public VeloxHashShuffleWriter {
       const std::shared_ptr<PartitionWriter>& partitionWriter,
       const std::shared_ptr<GpuHashShuffleWriterOptions>& options,
       MemoryManager* memoryManager)
-      : VeloxHashShuffleWriter(numPartitions, partitionWriter, options, memoryManager) {}
+      : VeloxHashShuffleWriter(numPartitions, partitionWriter, options, memoryManager),
+        gpuPartitionEnabled_(options->gpuPartition) {}
+
+  arrow::Status write(std::shared_ptr<ColumnarBatch> cb, int64_t memLimit) override;
 
  private:
-  // Split the bool to byte.
   void splitBoolValueType(const uint8_t* srcAddr, const std::vector<uint8_t*>& dstAddrs) override;
 
   uint64_t valueBufferSizeForBool(uint32_t newSize) override {
@@ -53,5 +59,20 @@ class VeloxGpuHashShuffleWriter : public VeloxHashShuffleWriter {
   uint64_t valueBufferSizeForTimestamp(uint32_t newSize) override {
     return sizeof(int64_t) * newSize;
   }
+
+  arrow::Status gpuPartitionAndEvict(
+      const std::shared_ptr<facebook::velox::cudf_velox::CudfVector>& cudfVec);
+
+  // Extract flat buffer list from a range [start, start+numRows) of a Velox RowVector
+  // in the format expected by InMemoryPayload. Works on the full (non-sliced) RowVector
+  // to avoid offset complications. Handles bool bit→byte, timestamp int128→int64, etc.
+  arrow::Status extractBuffersFromRowVector(
+      const facebook::velox::RowVector& rv,
+      int64_t start,
+      uint32_t numRows,
+      std::vector<std::shared_ptr<arrow::Buffer>>& outBuffers);
+
+  bool gpuPartitionEnabled_{false};
+  bool gpuSchemaInitialized_{false};
 };
 } // namespace gluten

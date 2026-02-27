@@ -185,7 +185,8 @@ class ColumnarShuffleWriter[K, V](
                 taskContext.partitionId),
               nativeBufferSize,
               reallocThreshold,
-              partitionWriterHandle
+              partitionWriterHandle,
+              GlutenConfig.get.enableCudfGpuPartition
             )
           } else {
             shuffleWriterJniWrapper.createHashShuffleWriter(
