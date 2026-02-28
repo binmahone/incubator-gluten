@@ -214,6 +214,12 @@ const std::string kCudfPinnedPoolSizeDefault = "0";
 const std::string kCudfHostAsPinnedThreshold = "spark.gluten.sql.columnar.backend.velox.cudf.hostAsPinnedThreshold";
 const std::string kCudfHostAsPinnedThresholdDefault = "0";
 
+// Use cudf::pack to consolidate GPU column buffers into a single contiguous
+// device buffer before D2H, reducing cudaMemcpyAsync call count from N (one
+// per buffer) to 1.  Set to "false" to revert to the legacy per-buffer path.
+const std::string kCudfPackedDtoH = "spark.gluten.sql.columnar.backend.velox.cudf.packedDtoH";
+const std::string kCudfPackedDtoHDefault = "true";
+
 const std::string kStaticBackendConfPrefix = "spark.gluten.velox.";
 const std::string kDynamicBackendConfPrefix = "spark.gluten.sql.columnar.backend.velox.";
 

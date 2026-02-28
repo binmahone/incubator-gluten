@@ -183,7 +183,9 @@ void VeloxBackend::init(
         {velox::cudf_velox::CudfConfig::kCudfPinnedPoolSize,
          backendConf_->get(kCudfPinnedPoolSize, kCudfPinnedPoolSizeDefault)},
         {velox::cudf_velox::CudfConfig::kCudfHostAsPinnedThreshold,
-         backendConf_->get(kCudfHostAsPinnedThreshold, kCudfHostAsPinnedThresholdDefault)}};
+         backendConf_->get(kCudfHostAsPinnedThreshold, kCudfHostAsPinnedThresholdDefault)},
+        {velox::cudf_velox::CudfConfig::kCudfPackedDtoH,
+         backendConf_->get(kCudfPackedDtoH, kCudfPackedDtoHDefault)}};
     auto& cudfConfig = velox::cudf_velox::CudfConfig::getInstance();
     cudfConfig.initialize(std::move(options));
     velox::cudf_velox::registerCudf();
