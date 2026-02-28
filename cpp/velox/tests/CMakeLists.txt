@@ -36,7 +36,10 @@ function(add_velox_test TEST_EXEC)
 endfunction()
 
 if(ENABLE_GPU)
-  function(import_library TARGET_NAME LIB_PATH)
+  function(import_library_once TARGET_NAME LIB_PATH)
+    if(TARGET ${TARGET_NAME})
+      return()
+    endif()
     if(NOT EXISTS ${LIB_PATH})
       message(FATAL_ERROR "Library does not exist: ${LIB_PATH}")
     endif()
@@ -60,17 +63,17 @@ if(ENABLE_GPU)
     add_executable(${TEST_EXEC} ${SOURCES} ${VELOX_TEST_COMMON_SRCS})
     target_include_directories(${TEST_EXEC} PRIVATE ${CMAKE_SOURCE_DIR}/velox
                                                     ${CMAKE_SOURCE_DIR}/src)
-    import_library(
+    import_library_once(
       facebook::velox::velox_cudf_expression
       ${VELOX_BUILD_PATH}/velox/experimental/cudf/expression/libvelox_cudf_expression.a
     )
-    import_library(
+    import_library_once(
       facebook::velox::velox_cudf_exec
       ${VELOX_BUILD_PATH}/velox/experimental/cudf/exec/libvelox_cudf_exec.a)
-    import_library(
+    import_library_once(
       facebook::velox::velox_cudf_vector
       ${VELOX_BUILD_PATH}/velox/experimental/cudf/vector/libvelox_cudf_vector.a)
-    import_library(
+    import_library_once(
       facebook::velox::velox_cudf_hive_connector
       ${VELOX_BUILD_PATH}/velox/experimental/cudf/connectors/hive/libvelox_cudf_hive_connector.a
     )
@@ -92,6 +95,8 @@ if(ENABLE_GPU)
 
   add_velox_gpu_test(velox_gpu_shuffle_writer_test SOURCES
                      VeloxGpuShuffleWriterTest.cc)
+  add_velox_gpu_test(velox_gpu_buffer_scatter_bench SOURCES
+                     GpuBufferScatterBench.cc)
 endif()
 
 set(VELOX_TEST_COMMON_SRCS JsonToProtoConverter.cc FilePathGenerator.cc)

@@ -118,7 +118,6 @@ arrow::Status VeloxGpuHashShuffleWriter::write(std::shared_ptr<ColumnarBatch> cb
                     << " cols=" << cudfVec->getTableView().num_columns();
           auto cpuRv = cudf_velox::with_arrow::toVeloxColumn(
               cudfVec->getTableView(), veloxPool_.get(), std::string(""), cudfVec->stream());
-          cudfVec->stream().synchronize();
           auto cpuBatch = std::make_shared<VeloxColumnarBatch>(cpuRv);
           RETURN_NOT_OK(VeloxHashShuffleWriter::write(cpuBatch, memLimit));
           for (uint32_t pid = 0; pid < numPartitions_; ++pid) {
@@ -131,7 +130,6 @@ arrow::Status VeloxGpuHashShuffleWriter::write(std::shared_ptr<ColumnarBatch> cb
         if (hasComplexType_) {
           auto cpuRv = cudf_velox::with_arrow::toVeloxColumn(
               cudfVec->getTableView(), veloxPool_.get(), std::string(""), cudfVec->stream());
-          cudfVec->stream().synchronize();
           auto cpuBatch = std::make_shared<VeloxColumnarBatch>(cpuRv);
           return VeloxHashShuffleWriter::write(cpuBatch, memLimit);
         }
@@ -194,7 +192,6 @@ arrow::Status VeloxGpuHashShuffleWriter::gpuPartitionAndEvict(
   // Single D2H: convert the entire partitioned table to a Velox RowVector.
   auto veloxRv = cudf_velox::with_arrow::toVeloxColumn(
       partitionedTable->view(), veloxPool_.get(), std::string(""), stream);
-  stream.synchronize();
 
   // CPU-side: extract buffers per partition directly from the full RowVector
   // using offsets (avoids sliced-vector offset pitfalls and enables zero-copy).

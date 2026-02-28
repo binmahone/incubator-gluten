@@ -25,13 +25,16 @@
 #include "velox/vector/FlatVector.h"
 
 #include <arrow/buffer.h>
+#include <arrow/memory_pool.h>
 
+#include <cstring>
 #include <cuda_runtime.h>
 #include <cudf/column/column.hpp>
 #include <cudf/column/column_factories.hpp>
 #include <cudf/column/column_view.hpp>
 #include <cudf/null_mask.hpp>
 #include <cudf/types.hpp>
+#include <cudf/utilities/pinned_memory.hpp>
 #include <cudf/utilities/type_dispatcher.hpp>
 #include <rmm/cuda_stream_view.hpp>
 #include <rmm/device_buffer.hpp>
@@ -41,6 +44,78 @@ using namespace facebook::velox;
 namespace gluten {
 
 namespace {
+
+/// arrow::MemoryPool that allocates from cudf's pinned-memory pool.  Composed
+/// buffers allocated here can be DMA'd directly by cudaMemcpyAsync without
+/// CUDA's internal pageable→pinned staging.  Falls back to the default pool on
+/// allocation failure (e.g. pinned pool exhausted).
+class PinnedArrowMemoryPool : public arrow::MemoryPool {
+ public:
+  arrow::Status Allocate(int64_t size, int64_t /*alignment*/, uint8_t** out) override {
+    try {
+      *out = static_cast<uint8_t*>(pinnedMr().allocate_sync(size));
+      bytesAllocated_.fetch_add(size, std::memory_order_relaxed);
+      return arrow::Status::OK();
+    } catch (...) {
+      return arrow::default_memory_pool()->Allocate(size, 0, out);
+    }
+  }
+
+  arrow::Status Reallocate(int64_t oldSize, int64_t newSize, int64_t /*alignment*/, uint8_t** ptr) override {
+    uint8_t* newBuf = nullptr;
+    try {
+      newBuf = static_cast<uint8_t*>(pinnedMr().allocate_sync(newSize));
+    } catch (...) {
+      return arrow::default_memory_pool()->Reallocate(oldSize, newSize, 0, ptr);
+    }
+    if (oldSize > 0 && *ptr) {
+      std::memcpy(newBuf, *ptr, std::min(oldSize, newSize));
+      pinnedMr().deallocate_sync(*ptr, oldSize);
+    }
+    *ptr = newBuf;
+    bytesAllocated_.fetch_add(newSize - oldSize, std::memory_order_relaxed);
+    return arrow::Status::OK();
+  }
+
+  void Free(uint8_t* buffer, int64_t size, int64_t /*alignment*/) override {
+    pinnedMr().deallocate_sync(buffer, size);
+    bytesAllocated_.fetch_sub(size, std::memory_order_relaxed);
+  }
+
+  int64_t bytes_allocated() const override {
+    return bytesAllocated_.load(std::memory_order_relaxed);
+  }
+
+  int64_t max_memory() const override { return -1; }
+  int64_t total_bytes_allocated() const override { return -1; }
+  int64_t num_allocations() const override { return -1; }
+  std::string backend_name() const override { return "cudf_pinned"; }
+
+ private:
+  static rmm::host_device_async_resource_ref pinnedMr() {
+    return cudf::get_pinned_memory_resource();
+  }
+  std::atomic<int64_t> bytesAllocated_{0};
+};
+
+/// Count null values from a CPU-resident Arrow validity bitmask (bit SET =
+/// valid).  Returns 0 when the mask is absent.  Avoids the implicit GPU sync
+/// that cudf::null_count() would cause.
+cudf::size_type cpuNullCount(const uint8_t* mask, int32_t numRows) {
+  if (!mask || numRows <= 0) {
+    return 0;
+  }
+  int64_t setBits = 0;
+  const int64_t fullBytes = numRows / 8;
+  for (int64_t i = 0; i < fullBytes; ++i) {
+    setBits += __builtin_popcount(mask[i]);
+  }
+  const int rem = numRows % 8;
+  if (rem > 0) {
+    setBits += __builtin_popcount(mask[fullBytes] & ((1 << rem) - 1));
+  }
+  return static_cast<cudf::size_type>(numRows - setBits);
+}
 
 struct DispatchColumn {
   rmm::cuda_stream_view stream;
@@ -60,50 +135,38 @@ struct DispatchColumn {
     return mask;
   }
 
-  // For timestamp, it is cudf cudf::type_id::TIMESTAMP_NANOSECONDS, Velox uses int128_t while cudf uses int64_t to
-  // represent it.
   template <TypeKind Kind, typename T = typename TypeTraits<Kind>::NativeType>
   std::unique_ptr<cudf::column> readFlatColumn(cudf::type_id typeId) {
-    // === Step 1: get CPU buffers ===
     auto nulls = buffers[bufferIdx++];
     auto values = buffers[bufferIdx++];
 
-    // === Step 2: allocate GPU device buffers and copy ===
     rmm::device_buffer dataBuf(values->size(), stream);
     CUDF_CUDA_TRY(
         cudaMemcpyAsync(dataBuf.data(), values->data(), values->size(), cudaMemcpyHostToDevice, stream.value()));
 
     auto nullBuf = getMaskBuffer(nulls);
 
-    // === Step 3: create cudf::column ===
     cudf::data_type cudfType{typeId};
-    size_t nullCount = nulls == nullptr || nulls->size() == 0
+    cudf::size_type nullCount = (nulls == nullptr || nulls->size() == 0)
         ? 0
-        : cudf::null_count(
-              reinterpret_cast<const cudf::bitmask_type*>(nullBuf->data()), 0, numRows, stream);
+        : cpuNullCount(nulls->data(), numRows);
     return std::make_unique<cudf::column>(cudfType, numRows, std::move(dataBuf), std::move(*nullBuf), nullCount);
   }
 
-  /// We can optimize it in shuffle writer side, returns the offset buffer instead of length buffer.
-  /// Then we don't need to recover the offsetBuf by rawLengths, also change the merge strategic, update the merge
-  /// buffer offset from last offset.
   std::unique_ptr<cudf::column> getOffsetsColumn(const std::shared_ptr<arrow::Buffer>& offsets) {
     VELOX_CHECK_GT(numRows, 0);
-    // --- 2. Copy offsets to GPU ---
     rmm::device_buffer offsetBuf(offsets->size(), stream, mr);
     CUDF_CUDA_TRY(
         cudaMemcpyAsync(offsetBuf.data(), offsets->data(), offsets->size(), cudaMemcpyHostToDevice, stream.value()));
 
-    // --- 3. Empty null mask (no nulls in offset column) ---
     rmm::device_buffer nullBuf(0, stream, mr);
 
-    // --- 4. Create cudf::column ---
     return std::make_unique<cudf::column>(
         cudf::data_type{cudf::type_id::INT32},
         static_cast<cudf::size_type>(numRows + 1),
         std::move(offsetBuf),
         std::move(nullBuf),
-        0); // null_count = 0
+        0);
   }
 
   std::unique_ptr<cudf::column> readFlatColumnStringView(cudf::type_id /*typeId*/) {
@@ -117,11 +180,9 @@ struct DispatchColumn {
 
     auto mask = getMaskBuffer(nulls);
 
-    // === Step 3: create cudf::column ===
-    size_t nullCount = nulls == nullptr || nulls->size() == 0
+    cudf::size_type nullCount = (nulls == nullptr || nulls->size() == 0)
         ? 0
-        : cudf::null_count(
-              reinterpret_cast<const cudf::bitmask_type*>(mask->data()), 0, numRows, stream);
+        : cpuNullCount(nulls->data(), numRows);
 
     auto offsetColumn = getOffsetsColumn(offsets);
 
@@ -184,7 +245,6 @@ std::shared_ptr<ColumnarBatch> GpuBufferBatchResizer::next() {
   while (cachedRows < minOutputBatchSize_) {
     auto nextCb = in_->next();
     if (!nextCb) {
-      // No more input.
       break;
     }
 
@@ -201,8 +261,11 @@ std::shared_ptr<ColumnarBatch> GpuBufferBatchResizer::next() {
     return nullptr;
   }
 
-  // Compose all cached batches into one
-  auto batch = GpuBufferColumnarBatch::compose(arrowPool_, cachedBatches, cachedRows);
+  // compose on CPU without GPU lock — allows multi-task parallelism.
+  // Allocate composed buffers in pinned memory so cudaMemcpyAsync can DMA
+  // directly without CUDA's internal pageable→pinned staging.
+  static thread_local PinnedArrowMemoryPool pinnedPool;
+  auto batch = GpuBufferColumnarBatch::compose(&pinnedPool, cachedBatches, cachedRows);
 
   GpuLockGuard gpuLock;
   return makeCudfTable(batch->getRowType(), batch->numRows(), batch->buffers(), pool_);

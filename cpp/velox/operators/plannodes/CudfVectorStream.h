@@ -97,6 +97,8 @@ class ValueStreamNode final : public facebook::velox::core::PlanNode {
 
 class CudfVectorStream : public CudfVectorStreamBase {
  public:
+  static constexpr int32_t kDefaultTargetBatchRows = 100000;
+
   CudfVectorStream(
       facebook::velox::exec::DriverCtx* driverCtx,
       facebook::velox::memory::MemoryPool* pool,
@@ -104,70 +106,98 @@ class CudfVectorStream : public CudfVectorStreamBase {
       const facebook::velox::RowTypePtr& outputType)
       : CudfVectorStreamBase(driverCtx, pool, iterator, outputType) {}
 
+  bool hasPending() const {
+    return !pendingRows_.empty() || stashedCudf_ != nullptr;
+  }
+
   // Convert columnar batch to a CudfVector for downstream GPU operators.
-  // Handles three input types:
-  //   1. VeloxColumnarBatch wrapping a CudfVector  -> re-wrap with outputType_
+  // Handles three input types with batch accumulation for Cases 2 & 3:
+  //   1. VeloxColumnarBatch wrapping a CudfVector  -> re-wrap (returned immediately)
   //   2. VeloxColumnarBatch wrapping a CPU RowVector (e.g. BroadcastExchange)
-  //      -> upload to GPU via toCudfTable
-  //   3. GpuBufferColumnarBatch (shuffle read) -> toRowVector() then upload to GPU
+  //      -> accumulated then batched upload
+  //   3. GpuBufferColumnarBatch (shuffle read) -> accumulated then batched upload
   facebook::velox::RowVectorPtr next() override {
-    auto cb = nextInternal();
-    if (cb == nullptr) {
+    // First, drain any pending accumulated rows.
+    // Then accumulate more from the iterator until target batch size.
+    while (pendingRowCount_ < kDefaultTargetBatchRows) {
+      auto cb = nextInternal();
+      if (cb == nullptr) {
+        break;
+      }
+
+      // Case 1: VeloxColumnarBatch wrapping a CudfVector
+      if (cb->getType() == "velox") {
+        auto vb = std::dynamic_pointer_cast<VeloxColumnarBatch>(cb);
+        VELOX_CHECK_NOT_NULL(vb);
+        auto vp = vb->getRowVector();
+        VELOX_CHECK_NOT_NULL(vp);
+        auto cudfVector =
+            std::dynamic_pointer_cast<facebook::velox::cudf_velox::CudfVector>(vp);
+        if (cudfVector != nullptr) {
+          // Already a CudfVector. If we have pending CPU rows, flush them
+          // first and stash this CudfVector for the next call.
+          if (!pendingRows_.empty()) {
+            stashedCudf_ = cudfVector;
+            break;
+          }
+          return std::make_shared<facebook::velox::cudf_velox::CudfVector>(
+              vp->pool(), outputType_, vp->size(), cudfVector->release(), cudfVector->stream());
+        }
+        // Case 2: CPU RowVector – accumulate for batched upload.
+        pendingRows_.push_back(vp);
+        pendingRowCount_ += vp->size();
+        continue;
+      }
+
+#ifdef GLUTEN_ENABLE_GPU
+      // Case 3: GpuBufferColumnarBatch – convert to RowVector and accumulate.
+      if (cb->getType() == "gpu") {
+        auto gpuBatch = std::dynamic_pointer_cast<GpuBufferColumnarBatch>(cb);
+        VELOX_CHECK_NOT_NULL(gpuBatch);
+        auto rowVector = gpuBatch->toRowVector(pool_);
+        VELOX_CHECK_NOT_NULL(rowVector);
+        pendingRows_.push_back(rowVector);
+        pendingRowCount_ += rowVector->size();
+        continue;
+      }
+#endif
+      VELOX_FAIL(
+          "Unsupported ColumnarBatch type: '{}', numColumns: {}, numRows: {}",
+          cb->getType(),
+          cb->numColumns(),
+          cb->numRows());
+    }
+
+    // If there's a stashed CudfVector and no pending CPU rows, return it.
+    if (pendingRows_.empty() && stashedCudf_ != nullptr) {
+      auto cudf = std::move(stashedCudf_);
+      stashedCudf_ = nullptr;
+      return std::make_shared<facebook::velox::cudf_velox::CudfVector>(
+          cudf->pool(), outputType_, cudf->size(), cudf->release(), cudf->stream());
+    }
+
+    if (pendingRows_.empty()) {
       return nullptr;
     }
 
-    // Cases 1 & 2: VeloxColumnarBatch
-    if (cb->getType() == "velox") {
-      auto vb = std::dynamic_pointer_cast<VeloxColumnarBatch>(cb);
-      VELOX_CHECK_NOT_NULL(vb);
-      auto vp = vb->getRowVector();
-      VELOX_CHECK_NOT_NULL(vp);
-      auto cudfVector = std::dynamic_pointer_cast<facebook::velox::cudf_velox::CudfVector>(vp);
-      if (cudfVector == nullptr) {
-        // Case 2: The vector comes from BroadcastExchange – it's a plain CPU
-        // RowVector. Upload to GPU so downstream CudfOperators get a CudfVector
-        // (this source is marked producesGpuOutput via CudfOperator).
-        auto stream = facebook::velox::cudf_velox::cudfGlobalStreamPool().get_stream();
-        auto tbl = facebook::velox::cudf_velox::with_arrow::toCudfTable(vp, pool_, stream);
-        stream.synchronize();
-        VELOX_CHECK_NOT_NULL(tbl);
-        const auto size = tbl->num_rows();
-        return std::make_shared<facebook::velox::cudf_velox::CudfVector>(
-            pool_, outputType_, size, std::move(tbl), stream);
-      }
-      // Case 1: Already a CudfVector – re-wrap with the correct outputType_.
-      return std::make_shared<facebook::velox::cudf_velox::CudfVector>(
-          vp->pool(), outputType_, vp->size(), cudfVector->release(), cudfVector->stream());
-    }
+    // Batched HtoD: N async from_arrow, ONE sync, GPU concatenate.
+    auto stream = facebook::velox::cudf_velox::cudfGlobalStreamPool().get_stream();
+    auto tbl = facebook::velox::cudf_velox::with_arrow::toCudfTableBatched(
+        pendingRows_, pool_, stream);
+    VELOX_CHECK_NOT_NULL(tbl);
+    const auto size = tbl->num_rows();
 
-#ifdef GLUTEN_ENABLE_GPU
-    // Case 3: GpuBufferColumnarBatch from shuffle reader – CPU Arrow buffers
-    // that need to be converted to a Velox RowVector then uploaded to GPU.
-    if (cb->getType() == "gpu") {
-      auto gpuBatch = std::dynamic_pointer_cast<GpuBufferColumnarBatch>(cb);
-      VELOX_CHECK_NOT_NULL(gpuBatch);
+    pendingRows_.clear();
+    pendingRowCount_ = 0;
 
-      // Convert CPU Arrow buffers to a Velox RowVector on CPU.
-      auto rowVector = gpuBatch->toRowVector(pool_);
-      VELOX_CHECK_NOT_NULL(rowVector);
-
-      // Upload CPU RowVector to GPU as a cudf::table, then wrap as CudfVector.
-      auto stream = facebook::velox::cudf_velox::cudfGlobalStreamPool().get_stream();
-      auto tbl = facebook::velox::cudf_velox::with_arrow::toCudfTable(rowVector, pool_, stream);
-      stream.synchronize();
-      VELOX_CHECK_NOT_NULL(tbl);
-
-      const auto size = tbl->num_rows();
-      return std::make_shared<facebook::velox::cudf_velox::CudfVector>(
-          pool_, outputType_, size, std::move(tbl), stream);
-    }
-#endif
-    VELOX_FAIL(
-        "Unsupported ColumnarBatch type: '{}', numColumns: {}, numRows: {}",
-        cb->getType(),
-        cb->numColumns(),
-        cb->numRows());
+    return std::make_shared<facebook::velox::cudf_velox::CudfVector>(
+        pool_, outputType_, size, std::move(tbl), stream);
   }
+
+ private:
+  std::vector<facebook::velox::RowVectorPtr> pendingRows_;
+  int32_t pendingRowCount_ = 0;
+  std::shared_ptr<facebook::velox::cudf_velox::CudfVector> stashedCudf_;
 };
 
 // To avoid plan translator uses false node, this one cannot inherit ValueStreamNode.
@@ -229,8 +259,12 @@ class CudfValueStream : public facebook::velox::exec::SourceOperator, public fac
     if (finished_) {
       return nullptr;
     }
-    if (rvStream_->hasNext()) {
-      return rvStream_->next();
+    if (rvStream_->hasNext() || rvStream_->hasPending()) {
+      auto result = rvStream_->next();
+      if (result == nullptr) {
+        finished_ = true;
+      }
+      return result;
     } else {
       finished_ = true;
       return nullptr;

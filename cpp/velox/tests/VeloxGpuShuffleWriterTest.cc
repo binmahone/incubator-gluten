@@ -742,7 +742,6 @@ class GpuPartitionHashShuffleWriterTest : public GpuVeloxShuffleWriterTest {
   std::shared_ptr<ColumnarBatch> toCudfBatch(const RowVectorPtr& rv) {
     auto stream = cudf_velox::cudfGlobalStreamPool().get_stream();
     auto table = cudf_velox::with_arrow::toCudfTable(rv, pool(), stream);
-    stream.synchronize();
     auto cudfVec = std::make_shared<cudf_velox::CudfVector>(
         pool(), rv->type(), rv->size(), std::move(table), stream);
     return std::make_shared<VeloxColumnarBatch>(cudfVec, rv->type()->size());
@@ -881,7 +880,6 @@ class GpuShufflePartitionBenchmark : public GpuVeloxShuffleWriterTest {
   std::shared_ptr<ColumnarBatch> toCudfBatch(const RowVectorPtr& rv) {
     auto stream = cudf_velox::cudfGlobalStreamPool().get_stream();
     auto table = cudf_velox::with_arrow::toCudfTable(rv, pool(), stream);
-    stream.synchronize();
     auto cudfVec = std::make_shared<cudf_velox::CudfVector>(
         pool(), rv->type(), rv->size(), std::move(table), stream);
     return std::make_shared<VeloxColumnarBatch>(cudfVec, rv->type()->size());
@@ -899,7 +897,6 @@ TEST_P(GpuShufflePartitionBenchmark, benchCpuVsGpu) {
   // Build CudfVector (data on GPU) — the common starting point for both paths.
   auto stream = cudf_velox::cudfGlobalStreamPool().get_stream();
   auto gpuTable = cudf_velox::with_arrow::toCudfTable(benchData, pool(), stream);
-  stream.synchronize();
   auto cudfVec = std::make_shared<cudf_velox::CudfVector>(
       pool(), benchData->type(), benchData->size(), std::move(gpuTable), stream);
 
