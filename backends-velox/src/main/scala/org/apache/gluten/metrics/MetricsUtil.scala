@@ -140,6 +140,8 @@ object MetricsUtil extends Logging {
     var numWrittenFiles: Long = 0
     var loadLazyVectorTime: Long = 0
     var numCoalescedBatches: Long = 0
+    var pinnedAllocBytes: Long = 0
+    var pageableAllocBytes: Long = 0
 
     val metricsIterator = operatorMetrics.iterator()
     while (metricsIterator.hasNext) {
@@ -176,6 +178,8 @@ object MetricsUtil extends Logging {
       numWrittenFiles += metrics.numWrittenFiles
       loadLazyVectorTime += metrics.loadLazyVectorTime
       numCoalescedBatches += metrics.numCoalescedBatches
+      pinnedAllocBytes += metrics.pinnedAllocBytes
+      pageableAllocBytes += metrics.pageableAllocBytes
     }
 
     new OperatorMetrics(
@@ -220,7 +224,9 @@ object MetricsUtil extends Logging {
       writeIOTime,
       numWrittenFiles,
       loadLazyVectorTime,
-      numCoalescedBatches
+      numCoalescedBatches,
+      pinnedAllocBytes,
+      pageableAllocBytes
     )
   }
 

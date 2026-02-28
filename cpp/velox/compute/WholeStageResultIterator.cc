@@ -64,6 +64,8 @@ const std::string kWaitForPreloadSplitNanos = "waitForPreloadSplitNanos";
 const std::string kDataSourceReadWallNanos = "dataSourceReadWallNanos";
 const std::string kNumWrittenFiles = "numWrittenFiles";
 const std::string kWriteIOTime = "writeIOWallNanos";
+const std::string kPinnedAllocBytes = "pinnedAllocBytes";
+const std::string kPageableAllocBytes = "pageableAllocBytes";
 
 // others
 const std::string kHiveDefaultPartition = "__HIVE_DEFAULT_PARTITION__";
@@ -517,6 +519,10 @@ void WholeStageResultIterator::collectMetrics() {
       metrics_->get(Metrics::kWriteIOTime)[metricIndex] = runtimeMetric("sum", second->customStats, kWriteIOTime);
       metrics_->get(Metrics::kNumCoalescedBatches)[metricIndex] =
           runtimeMetric("sum", second->customStats, kNumCoalescedBatches);
+      metrics_->get(Metrics::kPinnedAllocBytes)[metricIndex] =
+          runtimeMetric("sum", second->customStats, kPinnedAllocBytes);
+      metrics_->get(Metrics::kPageableAllocBytes)[metricIndex] =
+          runtimeMetric("sum", second->customStats, kPageableAllocBytes);
 
       metricIndex += 1;
     }

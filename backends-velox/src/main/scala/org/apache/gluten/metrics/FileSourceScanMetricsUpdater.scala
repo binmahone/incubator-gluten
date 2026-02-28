@@ -88,6 +88,8 @@ class FileSourceScanMetricsUpdater(@transient val metrics: Map[String, SQLMetric
       dataSourceAddSplitTime += operatorMetrics.dataSourceAddSplitTime
       dataSourceReadTime += operatorMetrics.dataSourceReadTime
       loadLazyVectorTime += operatorMetrics.loadLazyVectorTime
+      metrics("pinnedAllocBytes") += operatorMetrics.pinnedAllocBytes
+      metrics("pageableAllocBytes") += operatorMetrics.pageableAllocBytes
     }
   }
 }

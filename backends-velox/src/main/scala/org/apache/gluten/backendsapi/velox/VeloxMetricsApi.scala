@@ -126,7 +126,9 @@ class VeloxMetricsApi extends MetricsApi with Logging {
       "ramReadBytes" -> SQLMetrics.createSizeMetric(sparkContext, "ram read bytes"),
       "loadLazyVectorTime" -> SQLMetrics.createNanoTimingMetric(
         sparkContext,
-        "time of loading lazy vectors")
+        "time of loading lazy vectors"),
+      "pinnedAllocBytes" -> SQLMetrics.createSizeMetric(sparkContext, "pinned alloc bytes"),
+      "pageableAllocBytes" -> SQLMetrics.createSizeMetric(sparkContext, "pageable alloc bytes")
     )
 
   override def genBatchScanTransformerMetricsUpdater(
@@ -177,7 +179,9 @@ class VeloxMetricsApi extends MetricsApi with Logging {
       "ramReadBytes" -> SQLMetrics.createSizeMetric(sparkContext, "ram read bytes"),
       "loadLazyVectorTime" -> SQLMetrics.createNanoTimingMetric(
         sparkContext,
-        "time of loading lazy vectors")
+        "time of loading lazy vectors"),
+      "pinnedAllocBytes" -> SQLMetrics.createSizeMetric(sparkContext, "pinned alloc bytes"),
+      "pageableAllocBytes" -> SQLMetrics.createSizeMetric(sparkContext, "pageable alloc bytes")
     )
 
   override def genHiveTableScanTransformerMetricsUpdater(
@@ -228,7 +232,9 @@ class VeloxMetricsApi extends MetricsApi with Logging {
       "ramReadBytes" -> SQLMetrics.createSizeMetric(sparkContext, "ram read bytes"),
       "loadLazyVectorTime" -> SQLMetrics.createNanoTimingMetric(
         sparkContext,
-        "time of loading lazy vectors")
+        "time of loading lazy vectors"),
+      "pinnedAllocBytes" -> SQLMetrics.createSizeMetric(sparkContext, "pinned alloc bytes"),
+      "pageableAllocBytes" -> SQLMetrics.createSizeMetric(sparkContext, "pageable alloc bytes")
     )
 
   override def genFileSourceScanTransformerMetricsUpdater(

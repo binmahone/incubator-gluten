@@ -63,6 +63,9 @@ public class OperatorMetrics implements IOperatorMetrics {
 
   public long numCoalescedBatches;
 
+  public long pinnedAllocBytes;
+  public long pageableAllocBytes;
+
   /** Create an instance for operator metrics. */
   public OperatorMetrics(
       long inputRows,
@@ -106,7 +109,9 @@ public class OperatorMetrics implements IOperatorMetrics {
       long writeIOTime,
       long numWrittenFiles,
       long loadLazyVectorTime,
-      long numCoalescedBatches) {
+      long numCoalescedBatches,
+      long pinnedAllocBytes,
+      long pageableAllocBytes) {
     this.inputRows = inputRows;
     this.inputVectors = inputVectors;
     this.inputBytes = inputBytes;
@@ -149,5 +154,7 @@ public class OperatorMetrics implements IOperatorMetrics {
     this.numWrittenFiles = numWrittenFiles;
     this.loadLazyVectorTime = loadLazyVectorTime;
     this.numCoalescedBatches = numCoalescedBatches;
+    this.pinnedAllocBytes = pinnedAllocBytes;
+    this.pageableAllocBytes = pageableAllocBytes;
   }
 }

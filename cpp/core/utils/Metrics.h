@@ -96,6 +96,10 @@ struct Metrics {
     // Batch coalescing.
     kNumCoalescedBatches,
 
+    // Pinned memory allocation tracking.
+    kPinnedAllocBytes,
+    kPageableAllocBytes,
+
     // The end of enum items.
     kEnd,
     kNum = kEnd - kBegin
