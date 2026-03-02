@@ -60,6 +60,7 @@ class BatchScanMetricsUpdater(val metrics: Map[String, SQLMetric]) extends Metri
       metrics("loadLazyVectorTime") += operatorMetrics.loadLazyVectorTime
       metrics("pinnedAllocBytes") += operatorMetrics.pinnedAllocBytes
       metrics("pageableAllocBytes") += operatorMetrics.pageableAllocBytes
+      metrics("numCoalescedBatches") += operatorMetrics.numCoalescedBatches
     }
   }
 }

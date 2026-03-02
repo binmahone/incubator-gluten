@@ -44,6 +44,7 @@
 #include "cudf/GpuLock.h"
 #include "cudf/GpuMemoryTracker.h"
 #include "utils/GpuBufferBatchResizer.h"
+#include <cuda_runtime.h>
 #endif
 
 #ifdef GLUTEN_ENABLE_ENHANCED_FEATURES
@@ -903,6 +904,20 @@ JNIEXPORT void JNICALL Java_org_apache_gluten_gpu_GpuMemoryTrackerJniWrapper_set
   JNI_METHOD_START
   setGpuSemaphoreMode(enabled);
   JNI_METHOD_END()
+}
+
+JNIEXPORT jlong JNICALL Java_org_apache_gluten_gpu_GpuMemoryTrackerJniWrapper_getDeviceMemorySize( // NOLINT
+    JNIEnv* env,
+    jclass) {
+  JNI_METHOD_START
+  size_t freeMem = 0, totalMem = 0;
+  auto err = cudaMemGetInfo(&freeMem, &totalMem);
+  if (err != cudaSuccess) {
+    LOG(WARNING) << "cudaMemGetInfo failed: " << cudaGetErrorString(err);
+    return 0;
+  }
+  return static_cast<jlong>(totalMem);
+  JNI_METHOD_END(0)
 }
 #endif
 

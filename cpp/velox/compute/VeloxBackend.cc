@@ -180,6 +180,8 @@ void VeloxBackend::init(
          backendConf_->get(kCudfMemoryPercent, kCudfMemoryPercentDefault)},
         {velox::cudf_velox::CudfConfig::kCudfGpuTargetBatchRows,
          backendConf_->get(kCudfGpuTargetBatchRows, kCudfGpuTargetBatchRowsDefault)},
+        {velox::cudf_velox::CudfConfig::kCudfGpuTargetBatchBytes,
+         backendConf_->get(kCudfGpuTargetBatchBytes, kCudfGpuTargetBatchBytesDefault)},
         {velox::cudf_velox::CudfConfig::kCudfPinnedPoolSize,
          backendConf_->get(kCudfPinnedPoolSize, kCudfPinnedPoolSizeDefault)},
         {velox::cudf_velox::CudfConfig::kCudfHostAsPinnedThreshold,

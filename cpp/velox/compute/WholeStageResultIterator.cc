@@ -148,6 +148,16 @@ WholeStageResultIterator::WholeStageResultIterator(
 #endif
     std::vector<std::shared_ptr<velox::connector::ConnectorSplit>> connectorSplits;
     connectorSplits.reserve(paths.size());
+#ifdef GLUTEN_ENABLE_GPU
+    struct CudfFileInfo {
+      std::string path;
+      uint64_t start;
+      uint64_t length;
+      std::unordered_map<std::string, std::string> infoColumns;
+    };
+    std::vector<CudfFileInfo> cudfFileInfos;
+    cudfFileInfos.reserve(paths.size());
+#endif
     for (int idx = 0; idx < paths.size(); idx++) {
       auto metadataColumn = metadataColumns[idx];
       std::unordered_map<std::string, std::optional<std::string>> partitionKeys;
@@ -158,7 +168,7 @@ WholeStageResultIterator::WholeStageResultIterator(
 
       std::shared_ptr<velox::connector::ConnectorSplit> split;
       if (auto icebergSplitInfo = std::dynamic_pointer_cast<IcebergSplitInfo>(scanInfo)) {
-        // Set Iceberg split.
+        // Set Iceberg split (never coalesced).
         std::unordered_map<std::string, std::string> customSplitInfo{{"table_format", "hive-iceberg"}};
         auto deleteFiles = icebergSplitInfo->deleteFilesVec[idx];
         split = std::make_shared<velox::connector::hive::iceberg::HiveIcebergSplit>(
@@ -175,32 +185,97 @@ WholeStageResultIterator::WholeStageResultIterator(
             deleteFiles,
             std::unordered_map<std::string, std::string>(),
             properties[idx]);
+        connectorSplits.emplace_back(split);
       } else {
-        auto connectorId = kHiveConnectorId;
 #ifdef GLUTEN_ENABLE_GPU
-        if (canUseCudfConnector && enableCudf_ &&
-            veloxCfg_->get<bool>(kCudfEnableTableScan, kCudfEnableTableScanDefault)) {
-          connectorId = kCudfHiveConnectorId;
+        const bool useCudf = canUseCudfConnector && enableCudf_ &&
+            veloxCfg_->get<bool>(kCudfEnableTableScan, kCudfEnableTableScanDefault);
+        if (useCudf) {
+          // For CUDF connector: collect file info for coalesced split building.
+          // Actual CudfHiveConnectorSplit creation happens below after the loop.
+          // Strip URI scheme prefixes so downstream std::filesystem / std::ifstream
+          // calls receive native OS paths (e.g., "file:///data/..." → "///data/...").
+          std::string cleanedPath = paths[idx];
+          constexpr std::string_view kFilePrefix = "file:";
+          constexpr std::string_view kS3APrefix = "s3a:";
+          if (cleanedPath.compare(0, kFilePrefix.size(), kFilePrefix) == 0) {
+            cleanedPath = cleanedPath.substr(kFilePrefix.size());
+          } else if (cleanedPath.compare(0, kS3APrefix.size(), kS3APrefix) == 0) {
+            cleanedPath.erase(kS3APrefix.size() - 2, 1);
+          }
+          cudfFileInfos.push_back(
+              {std::move(cleanedPath), starts[idx], lengths[idx], metadataColumn});
+        } else {
+#endif
+          split = std::make_shared<velox::connector::hive::HiveConnectorSplit>(
+              kHiveConnectorId,
+              paths[idx],
+              format,
+              starts[idx],
+              lengths[idx],
+              partitionKeys,
+              std::nullopt /*tableBucketName*/,
+              std::unordered_map<std::string, std::string>(),
+              nullptr,
+              std::unordered_map<std::string, std::string>(),
+              0,
+              true,
+              metadataColumn,
+              properties[idx]);
+          connectorSplits.emplace_back(split);
+#ifdef GLUTEN_ENABLE_GPU
         }
 #endif
-        split = std::make_shared<velox::connector::hive::HiveConnectorSplit>(
-            connectorId,
-            paths[idx],
-            format,
-            starts[idx],
-            lengths[idx],
-            partitionKeys,
-            std::nullopt /*tableBucketName*/,
-            std::unordered_map<std::string, std::string>(),
-            nullptr,
-            std::unordered_map<std::string, std::string>(),
-            0,
-            true,
-            metadataColumn,
-            properties[idx]);
       }
-      connectorSplits.emplace_back(split);
     }
+
+#ifdef GLUTEN_ENABLE_GPU
+    // Coalesce CUDF file splits: group small files into coalesced splits
+    // to reduce per-file overhead and produce larger GPU batches.
+    // Split-file ranges (start != 0) are NOT coalesced because the pre-read
+    // buffer path creates a HOST_BUFFER datasource from [start, start+length)
+    // which the cuDF Parquet reader would treat as a complete file, failing
+    // the header/footer magic check.
+    if (!cudfFileInfos.empty()) {
+      const int64_t targetBytes =
+          velox::cudf_velox::CudfConfig::getInstance().gpuTargetBatchBytes;
+      size_t i = 0;
+      while (i < cudfFileInfos.size()) {
+        const auto& primary = cudfFileInfos[i];
+        std::vector<velox::cudf_velox::connector::hive::CoalescedFileRange>
+            coalescedFiles;
+        int64_t accumulatedLength = static_cast<int64_t>(primary.length);
+        ++i;
+        // Only coalesce whole-file ranges (start == 0). Split-file ranges
+        // must go through the full-file datasource + skip_bytes/num_bytes path.
+        const bool primaryIsWholeFile = (primary.start == 0);
+        while (primaryIsWholeFile && targetBytes > 0 &&
+               i < cudfFileInfos.size() &&
+               accumulatedLength < targetBytes) {
+          const auto& f = cudfFileInfos[i];
+          if (f.start != 0) {
+            break;
+          }
+          coalescedFiles.push_back(
+              {f.path, f.start, f.length, f.infoColumns});
+          accumulatedLength += static_cast<int64_t>(f.length);
+          ++i;
+        }
+        auto cudfSplit = std::make_shared<
+            velox::cudf_velox::connector::hive::CudfHiveConnectorSplit>(
+            kCudfHiveConnectorId,
+            primary.path,
+            primary.start,
+            primary.length,
+            0,
+            primary.infoColumns,
+            std::move(coalescedFiles));
+        connectorSplits.emplace_back(std::move(cudfSplit));
+      }
+      VLOG(1) << "Coalesced " << cudfFileInfos.size() << " CUDF files into "
+              << connectorSplits.size() << " splits";
+    }
+#endif
 
     std::vector<velox::exec::Split> scanSplits;
     scanSplits.reserve(connectorSplits.size());

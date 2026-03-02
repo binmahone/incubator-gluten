@@ -20,7 +20,22 @@
 #include "utils/Exception.h"
 #include "velox/common/memory/MemoryPool.h"
 
+#include <arrow/buffer.h>
+#include <arrow/memory_pool.h>
+
 namespace gluten {
+
+/// Convert CPU-resident Arrow buffers (from GpuBufferColumnarBatch) directly to
+/// a CudfVector on the GPU, bypassing the Velox RowVector intermediate format.
+std::shared_ptr<VeloxColumnarBatch> gpuBuffersToCudfVector(
+    facebook::velox::RowTypePtr type,
+    int32_t numRows,
+    const std::vector<std::shared_ptr<arrow::Buffer>>& buffers,
+    facebook::velox::memory::MemoryPool* pool);
+
+/// arrow::MemoryPool backed by cudf's pinned-memory pool, enabling
+/// DMA-friendly allocations for composed shuffle buffers.
+arrow::MemoryPool* getPinnedArrowMemoryPool();
 
 class GpuBufferBatchResizer : public ColumnarBatchIterator {
  public:

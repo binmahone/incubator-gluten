@@ -108,6 +108,7 @@ class HashJoinMetricsUpdater(override val metrics: Map[String, SQLMetric])
   val buildPreProjectionWallNanos: SQLMetric = metrics("buildPreProjectionWallNanos")
 
   val loadLazyVectorTime: SQLMetric = metrics("loadLazyVectorTime")
+  val numCoalescedBatches: SQLMetric = metrics("numCoalescedBatches")
 
   override protected def updateJoinMetricsInternal(
       joinMetrics: java.util.ArrayList[OperatorMetrics],
@@ -130,6 +131,7 @@ class HashJoinMetricsUpdater(override val metrics: Map[String, SQLMetric])
     hashProbeReplacedWithDynamicFilterRows += hashProbeMetrics.numReplacedWithDynamicFilterRows
     hashProbeDynamicFiltersProduced += hashProbeMetrics.numDynamicFiltersProduced
     bloomFilterBlocksByteSize += hashProbeMetrics.bloomFilterBlocksByteSize
+    numCoalescedBatches += hashProbeMetrics.numCoalescedBatches
     idx += 1
 
     // HashBuild

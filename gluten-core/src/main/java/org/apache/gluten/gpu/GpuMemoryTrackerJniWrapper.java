@@ -17,15 +17,13 @@
 package org.apache.gluten.gpu;
 
 /**
- * JNI bridge to the native GpuMemoryTracker. Wraps the RMM device memory
- * resource to track per-task GPU memory allocations.
+ * JNI bridge to the native GpuMemoryTracker. Wraps the RMM device memory resource to track per-task
+ * GPU memory allocations.
  *
- * <p>Must be a Java class (not Scala object) so that {@code static native}
- * methods produce JNI symbols without the {@code _00024} ($) encoding that
- * Scala objects require.
+ * <p>Must be a Java class (not Scala object) so that {@code static native} methods produce JNI
+ * symbols without the {@code _00024} ($) encoding that Scala objects require.
  *
- * <p>Native methods are defined in VeloxJniWrapper.cc under the
- * GLUTEN_ENABLE_GPU guard.
+ * <p>Native methods are defined in VeloxJniWrapper.cc under the GLUTEN_ENABLE_GPU guard.
  */
 public final class GpuMemoryTrackerJniWrapper {
 
@@ -51,4 +49,7 @@ public final class GpuMemoryTrackerJniWrapper {
 
   /** Enable/disable semaphore mode in C++ GpuLock (makes lockGpu/unlockGpu no-ops). */
   public static native void setGpuSemaphoreMode(boolean enabled);
+
+  /** Query total device memory in bytes via cudaMemGetInfo. Returns 0 on failure. */
+  public static native long getDeviceMemorySize();
 }

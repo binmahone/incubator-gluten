@@ -204,6 +204,9 @@ const std::string kCudfHiveConnectorId = "cudf-hive";
 const std::string kCudfGpuTargetBatchRows = "spark.gluten.sql.columnar.backend.velox.cudf.gpuTargetBatchRows";
 const std::string kCudfGpuTargetBatchRowsDefault = "1000000";
 
+const std::string kCudfGpuTargetBatchBytes = "spark.gluten.sql.columnar.backend.velox.cudf.gpuTargetBatchBytes";
+const std::string kCudfGpuTargetBatchBytesDefault = "2147483648"; // 2 GiB
+
 // Pinned host memory pool size in bytes for fast HtoD/DtoH PCIe transfers.
 // Default "0" uses cudf's default (0.5% of device memory, capped at 64 MB).
 const std::string kCudfPinnedPoolSize = "spark.gluten.sql.columnar.backend.velox.cudf.pinnedPoolSize";

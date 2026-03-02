@@ -34,6 +34,7 @@ class ProjectMetricsUpdater(
       metrics("peakMemoryBytes") += operatorMetrics.peakMemoryBytes
       metrics("numMemoryAllocations") += operatorMetrics.numMemoryAllocations
       metrics("loadLazyVectorTime") += operatorMetrics.loadLazyVectorTime
+      metrics("numCoalescedBatches") += operatorMetrics.numCoalescedBatches
       extraMetrics.foreach {
         case (name, metric) =>
           name match {

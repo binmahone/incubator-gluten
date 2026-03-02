@@ -282,8 +282,23 @@ class VeloxListenerApi extends ListenerApi with Logging {
       .map(_.toLong)
       .getOrElse {
         val memPercent = conf.getInt(CUDF_MEMORY_PERCENT.key, 50)
-        val estimatedGpuMem = 16L * 1024 * 1024 * 1024
-        estimatedGpuMem * memPercent / 100
+        val detectedGpuMem = try {
+          val total = GpuMemoryTrackerJniWrapper.getDeviceMemorySize()
+          if (total > 0) {
+            logInfo(s"Detected GPU device memory: ${total / (1024 * 1024)}MB")
+            total
+          } else {
+            logWarning("cudaMemGetInfo returned 0, falling back to 16GB estimate")
+            16L * 1024 * 1024 * 1024
+          }
+        } catch {
+          case e: UnsatisfiedLinkError =>
+            logWarning(
+              s"getDeviceMemorySize JNI not available, falling back to 16GB estimate: " +
+                s"${e.getMessage}")
+            16L * 1024 * 1024 * 1024
+        }
+        detectedGpuMem * memPercent / 100
       }
 
     val concurrentTasks = conf.getOption(CUDF_CONCURRENT_GPU_TASKS.key).map(_.toInt)

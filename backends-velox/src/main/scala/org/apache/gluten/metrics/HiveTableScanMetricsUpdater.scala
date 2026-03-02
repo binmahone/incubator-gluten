@@ -85,6 +85,7 @@ class HiveTableScanMetricsUpdater(@transient val metrics: Map[String, SQLMetric]
       loadLazyVectorTime += operatorMetrics.loadLazyVectorTime
       metrics("pinnedAllocBytes") += operatorMetrics.pinnedAllocBytes
       metrics("pageableAllocBytes") += operatorMetrics.pageableAllocBytes
+      metrics("numCoalescedBatches") += operatorMetrics.numCoalescedBatches
     }
   }
 }

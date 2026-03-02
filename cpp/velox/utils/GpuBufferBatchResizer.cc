@@ -28,6 +28,7 @@
 #include <arrow/memory_pool.h>
 
 #include <cstring>
+#include <unordered_set>
 #include <cuda_runtime.h>
 #include <cudf/column/column.hpp>
 #include <cudf/column/column_factories.hpp>
@@ -51,22 +52,37 @@ namespace {
 /// allocation failure (e.g. pinned pool exhausted).
 class PinnedArrowMemoryPool : public arrow::MemoryPool {
  public:
-  arrow::Status Allocate(int64_t size, int64_t /*alignment*/, uint8_t** out) override {
+  arrow::Status Allocate(int64_t size, int64_t alignment, uint8_t** out) override {
     try {
       *out = static_cast<uint8_t*>(pinnedMr().allocate_sync(size));
       bytesAllocated_.fetch_add(size, std::memory_order_relaxed);
       return arrow::Status::OK();
     } catch (...) {
-      return arrow::default_memory_pool()->Allocate(size, 0, out);
+      ARROW_RETURN_NOT_OK(arrow::default_memory_pool()->Allocate(size, alignment, out));
+      fallbackPtrs_.insert(*out);
+      return arrow::Status::OK();
     }
   }
 
-  arrow::Status Reallocate(int64_t oldSize, int64_t newSize, int64_t /*alignment*/, uint8_t** ptr) override {
+  arrow::Status Reallocate(int64_t oldSize, int64_t newSize, int64_t alignment, uint8_t** ptr) override {
+    if (fallbackPtrs_.count(*ptr)) {
+      fallbackPtrs_.erase(*ptr);
+      ARROW_RETURN_NOT_OK(arrow::default_memory_pool()->Reallocate(oldSize, newSize, alignment, ptr));
+      fallbackPtrs_.insert(*ptr);
+      return arrow::Status::OK();
+    }
     uint8_t* newBuf = nullptr;
     try {
       newBuf = static_cast<uint8_t*>(pinnedMr().allocate_sync(newSize));
     } catch (...) {
-      return arrow::default_memory_pool()->Reallocate(oldSize, newSize, 0, ptr);
+      ARROW_RETURN_NOT_OK(arrow::default_memory_pool()->Allocate(newSize, alignment, &newBuf));
+      if (oldSize > 0 && *ptr) {
+        std::memcpy(newBuf, *ptr, std::min(oldSize, newSize));
+        pinnedMr().deallocate_sync(*ptr, oldSize);
+      }
+      *ptr = newBuf;
+      fallbackPtrs_.insert(*ptr);
+      return arrow::Status::OK();
     }
     if (oldSize > 0 && *ptr) {
       std::memcpy(newBuf, *ptr, std::min(oldSize, newSize));
@@ -77,7 +93,11 @@ class PinnedArrowMemoryPool : public arrow::MemoryPool {
     return arrow::Status::OK();
   }
 
-  void Free(uint8_t* buffer, int64_t size, int64_t /*alignment*/) override {
+  void Free(uint8_t* buffer, int64_t size, int64_t alignment) override {
+    if (fallbackPtrs_.erase(buffer)) {
+      arrow::default_memory_pool()->Free(buffer, size, alignment);
+      return;
+    }
     pinnedMr().deallocate_sync(buffer, size);
     bytesAllocated_.fetch_sub(size, std::memory_order_relaxed);
   }
@@ -96,6 +116,7 @@ class PinnedArrowMemoryPool : public arrow::MemoryPool {
     return cudf::get_pinned_memory_resource();
   }
   std::atomic<int64_t> bytesAllocated_{0};
+  std::unordered_set<uint8_t*> fallbackPtrs_;
 };
 
 /// Count null values from a CPU-resident Arrow validity bitmask (bit SET =
@@ -204,7 +225,9 @@ std::unique_ptr<cudf::column> DispatchColumn::readFlatColumn<TypeKind::VARBINARY
   return readFlatColumnStringView(typeId);
 }
 
-std::shared_ptr<VeloxColumnarBatch> makeCudfTable(
+} // namespace
+
+std::shared_ptr<VeloxColumnarBatch> gpuBuffersToCudfVector(
     RowTypePtr type,
     int32_t numRows,
     const std::vector<std::shared_ptr<arrow::Buffer>>& buffers,
@@ -225,7 +248,10 @@ std::shared_ptr<VeloxColumnarBatch> makeCudfTable(
       std::make_shared<cudf_velox::CudfVector>(pool, type, numRows, std::move(cudfTable), stream), type->size());
 }
 
-} // namespace
+arrow::MemoryPool* getPinnedArrowMemoryPool() {
+  static thread_local PinnedArrowMemoryPool pool;
+  return &pool;
+}
 
 GpuBufferBatchResizer::GpuBufferBatchResizer(
     arrow::MemoryPool* arrowPool,
@@ -264,11 +290,12 @@ std::shared_ptr<ColumnarBatch> GpuBufferBatchResizer::next() {
   // compose on CPU without GPU lock — allows multi-task parallelism.
   // Allocate composed buffers in pinned memory so cudaMemcpyAsync can DMA
   // directly without CUDA's internal pageable→pinned staging.
-  static thread_local PinnedArrowMemoryPool pinnedPool;
-  auto batch = GpuBufferColumnarBatch::compose(&pinnedPool, cachedBatches, cachedRows);
+  auto batch = GpuBufferColumnarBatch::compose(
+      getPinnedArrowMemoryPool(), cachedBatches, cachedRows);
 
   GpuLockGuard gpuLock;
-  return makeCudfTable(batch->getRowType(), batch->numRows(), batch->buffers(), pool_);
+  return gpuBuffersToCudfVector(
+      batch->getRowType(), batch->numRows(), batch->buffers(), pool_);
 }
 
 int64_t GpuBufferBatchResizer::spillFixedSize(int64_t size) {

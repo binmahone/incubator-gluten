@@ -205,7 +205,6 @@ if(ENABLE_GPU)
     VELOX_SRCS
     cudf/CudfPlanValidator.cc
     cudf/GpuLock.cc
-    cudf/GpuMemoryTracker.cc
     operators/plannodes/CudfVectorStream.cc
     shuffle/VeloxGpuShuffleReader.cc
     shuffle/VeloxGpuShuffleWriter.cc

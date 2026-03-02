@@ -75,7 +75,8 @@ class VeloxMetricsApi extends MetricsApi with Logging {
 
     Map(
       "cpuCount" -> SQLMetrics.createMetric(sparkContext, "cpu wall time count"),
-      "wallNanos" -> wallNanosMetric
+      "wallNanos" -> wallNanosMetric,
+      "numCoalescedBatches" -> SQLMetrics.createMetric(sparkContext, "number of coalesced batches")
     ) ++ outputMetrics
   }
 
@@ -128,7 +129,8 @@ class VeloxMetricsApi extends MetricsApi with Logging {
         sparkContext,
         "time of loading lazy vectors"),
       "pinnedAllocBytes" -> SQLMetrics.createSizeMetric(sparkContext, "pinned alloc bytes"),
-      "pageableAllocBytes" -> SQLMetrics.createSizeMetric(sparkContext, "pageable alloc bytes")
+      "pageableAllocBytes" -> SQLMetrics.createSizeMetric(sparkContext, "pageable alloc bytes"),
+      "numCoalescedBatches" -> SQLMetrics.createMetric(sparkContext, "number of coalesced batches")
     )
 
   override def genBatchScanTransformerMetricsUpdater(
@@ -181,7 +183,8 @@ class VeloxMetricsApi extends MetricsApi with Logging {
         sparkContext,
         "time of loading lazy vectors"),
       "pinnedAllocBytes" -> SQLMetrics.createSizeMetric(sparkContext, "pinned alloc bytes"),
-      "pageableAllocBytes" -> SQLMetrics.createSizeMetric(sparkContext, "pageable alloc bytes")
+      "pageableAllocBytes" -> SQLMetrics.createSizeMetric(sparkContext, "pageable alloc bytes"),
+      "numCoalescedBatches" -> SQLMetrics.createMetric(sparkContext, "number of coalesced batches")
     )
 
   override def genHiveTableScanTransformerMetricsUpdater(
@@ -234,7 +237,8 @@ class VeloxMetricsApi extends MetricsApi with Logging {
         sparkContext,
         "time of loading lazy vectors"),
       "pinnedAllocBytes" -> SQLMetrics.createSizeMetric(sparkContext, "pinned alloc bytes"),
-      "pageableAllocBytes" -> SQLMetrics.createSizeMetric(sparkContext, "pageable alloc bytes")
+      "pageableAllocBytes" -> SQLMetrics.createSizeMetric(sparkContext, "pageable alloc bytes"),
+      "numCoalescedBatches" -> SQLMetrics.createMetric(sparkContext, "number of coalesced batches")
     )
 
   override def genFileSourceScanTransformerMetricsUpdater(
@@ -253,7 +257,8 @@ class VeloxMetricsApi extends MetricsApi with Logging {
         "number of memory allocations"),
       "loadLazyVectorTime" -> SQLMetrics.createNanoTimingMetric(
         sparkContext,
-        "time of loading lazy vectors")
+        "time of loading lazy vectors"),
+      "numCoalescedBatches" -> SQLMetrics.createMetric(sparkContext, "number of coalesced batches")
     )
 
   override def genFilterTransformerMetricsUpdater(
@@ -274,7 +279,8 @@ class VeloxMetricsApi extends MetricsApi with Logging {
         "number of memory allocations"),
       "loadLazyVectorTime" -> SQLMetrics.createNanoTimingMetric(
         sparkContext,
-        "time of loading lazy vectors")
+        "time of loading lazy vectors"),
+      "numCoalescedBatches" -> SQLMetrics.createMetric(sparkContext, "number of coalesced batches")
     )
 
   override def genProjectTransformerMetricsUpdater(
@@ -661,7 +667,8 @@ class VeloxMetricsApi extends MetricsApi with Logging {
       "numOutputBytes" -> SQLMetrics.createSizeMetric(sparkContext, "number of output bytes"),
       "loadLazyVectorTime" -> SQLMetrics.createNanoTimingMetric(
         sparkContext,
-        "time of loading lazy vectors")
+        "time of loading lazy vectors"),
+      "numCoalescedBatches" -> SQLMetrics.createMetric(sparkContext, "number of coalesced batches")
     )
 
   override def genHashJoinTransformerMetricsUpdater(

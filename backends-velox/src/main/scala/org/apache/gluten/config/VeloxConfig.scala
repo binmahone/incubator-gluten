@@ -697,6 +697,16 @@ object VeloxConfig extends ConfigRegistry {
       .intConf
       .createWithDefault(1000000)
 
+  val CUDF_GPU_TARGET_BATCH_BYTES =
+    buildStaticConf("spark.gluten.sql.columnar.backend.velox.cudf.gpuTargetBatchBytes")
+      .doc(
+        "Target minimum byte size for a GPU batch. When non-zero, operators use this " +
+          "as the primary coalescing threshold instead of row counts. This produces better " +
+          "GPU utilization for wide tables where a small number of rows already consumes " +
+          "significant memory. Default 2 GiB. Set to 0 to fall back to row-based accumulation.")
+      .longConf
+      .createWithDefault(2147483648L)
+
   val CUDF_GPU_SEMAPHORE_ENABLED =
     buildConf("spark.gluten.sql.columnar.backend.velox.cudf.gpuSemaphore.enabled")
       .doc(
@@ -705,7 +715,7 @@ object VeloxConfig extends ConfigRegistry {
           "based on permit-based memory estimation. When false, the original single-task " +
           "GPU lock is used. Only takes effect when cudf is enabled.")
       .booleanConf
-      .createWithDefault(false)
+      .createWithDefault(true)
 
   val CUDF_CONCURRENT_GPU_TASKS =
     buildConf("spark.gluten.sql.columnar.backend.velox.cudf.concurrentGpuTasks")
