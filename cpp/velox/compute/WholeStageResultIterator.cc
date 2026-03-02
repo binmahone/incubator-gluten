@@ -24,6 +24,7 @@
 #include "velox/connectors/hive/HiveConnectorSplit.h"
 #include "velox/exec/PlanNodeStats.h"
 #ifdef GLUTEN_ENABLE_GPU
+#include <optional>
 #include <cudf/io/types.hpp>
 #include "velox/experimental/cudf/CudfConfig.h"
 #include "velox/experimental/cudf/connectors/hive/CudfHiveConnectorSplit.h"
@@ -313,12 +314,14 @@ std::shared_ptr<ColumnarBatch> WholeStageResultIterator::next() {
   velox::RowVectorPtr vector;
 
 #ifdef GLUTEN_ENABLE_GPU
-  // Hold GPU lock for the entire pipeline execution (scan → cudf compute →
-  // CudfToVelox D2H). The lock is released before CPU-side post-processing
-  // (loadedVector, shuffle write) so other tasks can use the GPU. Reentrant:
-  // CudfHiveDataSource's inner GpuGuard nests safely via ref-counting.
+  // RAII guard: hold GPU lock for the entire pipeline execution (scan → cudf
+  // compute → CudfToVelox D2H). Released automatically when guard goes out of
+  // scope — safe even if task_->next() throws. Reentrant: CudfHiveDataSource's
+  // inner GpuGuard and VeloxGpuColumnarBatchSerializer's GpuLockGuard nest
+  // safely via ref-counting.
+  std::optional<GpuLockGuard> gpuGuard;
   if (enableCudf_) {
-    lockGpu();
+    gpuGuard.emplace();
   }
 #endif
 
@@ -339,9 +342,7 @@ std::shared_ptr<ColumnarBatch> WholeStageResultIterator::next() {
   }
 
 #ifdef GLUTEN_ENABLE_GPU
-  if (enableCudf_) {
-    unlockGpu();
-  }
+  gpuGuard.reset();
 #endif
 
   if (vector == nullptr) {

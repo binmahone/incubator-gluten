@@ -19,6 +19,7 @@
 
 #include <arrow/buffer.h>
 
+#include "cudf/GpuLock.h"
 #include "memory/ArrowMemory.h"
 #include "memory/VeloxColumnarBatch.h"
 #include "velox/common/memory/Memory.h"
@@ -28,7 +29,7 @@
 #include "velox/experimental/cudf/exec/Utilities.h"
 #include "velox/experimental/cudf/vector/CudfVector.h"
 
-#include <iostream>
+#include <glog/logging.h>
 
 using namespace facebook::velox;
 
@@ -43,10 +44,14 @@ VeloxGpuColumnarBatchSerializer::VeloxGpuColumnarBatchSerializer(
 
 std::shared_ptr<ColumnarBatch> VeloxGpuColumnarBatchSerializer::deserialize(uint8_t* data, int32_t size) {
   auto vb = VeloxColumnarBatchSerializer::deserialize(data, size);
+  auto rv = dynamic_pointer_cast<VeloxColumnarBatch>(vb)->getRowVector();
+  auto numRows = rv->size();
+
+  GpuLockGuard gpuLock;
   auto stream = cudf_velox::cudfGlobalStreamPool().get_stream();
-  auto table = cudf_velox::with_arrow::toCudfTable(dynamic_pointer_cast<VeloxColumnarBatch>(vb)->getRowVector(), veloxPool_.get(), stream);
+  auto table = cudf_velox::with_arrow::toCudfTable(rv, veloxPool_.get(), stream);
   auto vector = std::make_shared<cudf_velox::CudfVector>(
-      veloxPool_.get(), rowType_, size, std::move(table), stream);
+      veloxPool_.get(), rowType_, numRows, std::move(table), stream);
   return std::make_shared<VeloxColumnarBatch>(vector, vb->numColumns());
 }
 
