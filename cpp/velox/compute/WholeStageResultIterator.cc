@@ -311,6 +311,17 @@ std::shared_ptr<ColumnarBatch> WholeStageResultIterator::next() {
     return nullptr;
   }
   velox::RowVectorPtr vector;
+
+#ifdef GLUTEN_ENABLE_GPU
+  // Hold GPU lock for the entire pipeline execution (scan → cudf compute →
+  // CudfToVelox D2H). The lock is released before CPU-side post-processing
+  // (loadedVector, shuffle write) so other tasks can use the GPU. Reentrant:
+  // CudfHiveDataSource's inner GpuGuard nests safely via ref-counting.
+  if (enableCudf_) {
+    lockGpu();
+  }
+#endif
+
   while (true) {
     auto future = velox::ContinueFuture::makeEmpty();
     auto out = task_->next(&future);
@@ -326,6 +337,13 @@ std::shared_ptr<ColumnarBatch> WholeStageResultIterator::next() {
             << taskStateString(task_->state());
     future.wait();
   }
+
+#ifdef GLUTEN_ENABLE_GPU
+  if (enableCudf_) {
+    unlockGpu();
+  }
+#endif
+
   if (vector == nullptr) {
     return nullptr;
   }
