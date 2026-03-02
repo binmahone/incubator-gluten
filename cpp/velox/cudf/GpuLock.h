@@ -21,14 +21,19 @@
 
 namespace gluten {
 
-/// Enable semaphore mode: lockGpu/unlockGpu become no-ops because
-/// concurrency is managed by the Java-side GpuSemaphore instead.
-void setGpuSemaphoreMode(bool enabled);
+/// Set the maximum number of concurrent GPU operations.
+/// Default is 1 (serial, same as the original mutex behavior).
+/// Values > 1 allow multiple threads to use the GPU concurrently.
+void setMaxConcurrentGpuTasks(int n);
 
-/// Check if semaphore mode is active.
-bool isGpuSemaphoreMode();
+/// Get the current max concurrent GPU tasks setting.
+int getMaxConcurrentGpuTasks();
 
+/// Acquire GPU access. Blocks if the concurrency limit is reached.
+/// Reentrant: multiple calls from the same thread are ref-counted.
 void lockGpu();
+
+/// Release GPU access. Only truly releases when the ref count reaches zero.
 void unlockGpu();
 
 class GpuLockGuard {

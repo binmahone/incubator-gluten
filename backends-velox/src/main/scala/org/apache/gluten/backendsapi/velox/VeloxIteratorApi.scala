@@ -20,7 +20,7 @@ import org.apache.gluten.backendsapi.{BackendsApiManager, IteratorApi}
 import org.apache.gluten.backendsapi.velox.VeloxIteratorApi.unescapePathName
 import org.apache.gluten.config.{GlutenConfig, VeloxConfig}
 import org.apache.gluten.execution._
-import org.apache.gluten.gpu.{GpuMemoryTrackerJniWrapper, GpuSemaphore}
+import org.apache.gluten.gpu.GpuMemoryTrackerJniWrapper
 import org.apache.gluten.iterator.Iterators
 import org.apache.gluten.metrics.{IMetrics, IteratorMetricsJniWrapper}
 import org.apache.gluten.sql.shims.SparkShimLoader
@@ -194,8 +194,7 @@ class VeloxIteratorApi extends IteratorApi with Logging {
       inputPartition.isInstanceOf[GlutenPartition],
       "Velox backend only accept GlutenPartition.")
 
-    if (enableCudf && GpuSemaphore.isInitialized) {
-      GpuSemaphore.acquireIfNecessary(context)
+    if (enableCudf) {
       trySetCurrentTask(context)
     }
 
@@ -234,9 +233,8 @@ class VeloxIteratorApi extends IteratorApi with Logging {
         updateNativeMetrics(itrMetrics.fetch(resIter))
         updateInputMetrics(context.taskMetrics().inputMetrics)
         resIter.close()
-        if (enableCudf && GpuSemaphore.isInitialized) {
+        if (enableCudf) {
           tryStopTaskTracking(context)
-          GpuSemaphore.releaseIfNecessary(context)
           tryClearTaskMemory(context)
         }
       }
@@ -259,8 +257,7 @@ class VeloxIteratorApi extends IteratorApi with Logging {
       partitionIndex: Int,
       materializeInput: Boolean,
       enableCudf: Boolean = false): Iterator[ColumnarBatch] = {
-    if (enableCudf && GpuSemaphore.isInitialized) {
-      GpuSemaphore.acquireIfNecessary(context)
+    if (enableCudf) {
       trySetCurrentTask(context)
     }
 
@@ -292,9 +289,8 @@ class VeloxIteratorApi extends IteratorApi with Logging {
       .recycleIterator {
         updateNativeMetrics(itrMetrics.fetch(nativeResultIterator))
         nativeResultIterator.close()
-        if (enableCudf && GpuSemaphore.isInitialized) {
+        if (enableCudf) {
           tryStopTaskTracking(context)
-          GpuSemaphore.releaseIfNecessary(context)
           tryClearTaskMemory(context)
         }
       }

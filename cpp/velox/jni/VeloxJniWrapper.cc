@@ -897,12 +897,12 @@ JNIEXPORT jlong JNICALL Java_org_apache_gluten_gpu_GpuMemoryTrackerJniWrapper_cl
   JNI_METHOD_END(0)
 }
 
-JNIEXPORT void JNICALL Java_org_apache_gluten_gpu_GpuMemoryTrackerJniWrapper_setGpuSemaphoreMode( // NOLINT
+JNIEXPORT void JNICALL Java_org_apache_gluten_gpu_GpuMemoryTrackerJniWrapper_setMaxConcurrentGpuTasks( // NOLINT
     JNIEnv* env,
     jclass,
-    jboolean enabled) {
+    jint maxTasks) {
   JNI_METHOD_START
-  setGpuSemaphoreMode(enabled);
+  setMaxConcurrentGpuTasks(static_cast<int>(maxTasks));
   JNI_METHOD_END()
 }
 

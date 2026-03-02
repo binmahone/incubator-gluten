@@ -23,7 +23,7 @@ import org.apache.gluten.config.VeloxConfig._
 import org.apache.gluten.execution.datasource.GlutenFormatFactory
 import org.apache.gluten.expression.UDFMappings
 import org.apache.gluten.extension.columnar.transition.Convention
-import org.apache.gluten.gpu.{GpuMemoryTrackerJniWrapper, GpuSemaphore, RmmGpuMemoryProvider}
+import org.apache.gluten.gpu.GpuMemoryTrackerJniWrapper
 import org.apache.gluten.init.NativeBackendInitializer
 import org.apache.gluten.jni.{JniLibLoader, JniWorkspace}
 import org.apache.gluten.memory.{MemoryUsageRecorder, SimpleMemoryUsageRecorder}
@@ -141,7 +141,6 @@ class VeloxListenerApi extends ListenerApi with Logging {
   }
 
   override def onDriverShutdown(): Unit = {
-    GpuSemaphore.shutdown()
     try {
       GpuMemoryTrackerJniWrapper.shutdown()
     } catch {
@@ -176,11 +175,10 @@ class VeloxListenerApi extends ListenerApi with Logging {
   }
 
   override def onExecutorShutdown(): Unit = {
-    GpuSemaphore.shutdown()
     try {
       GpuMemoryTrackerJniWrapper.shutdown()
     } catch {
-      case _: UnsatisfiedLinkError => // JNI not loaded, nothing to shut down
+      case _: UnsatisfiedLinkError =>
     }
     shutdown()
   }
@@ -264,19 +262,6 @@ class VeloxListenerApi extends ListenerApi with Logging {
       return
     }
 
-    // Read directly from SparkConf, not VeloxConfig.get (which uses SQLConf).
-    // SQLConf is not yet bound to a session during onExecutorStart, so it would
-    // return default values.
-    val semaphoreEnabled =
-      conf.getBoolean(CUDF_GPU_SEMAPHORE_ENABLED.key, CUDF_GPU_SEMAPHORE_ENABLED.defaultValue.get)
-    logInfo(
-      s"GPU semaphore config: ${CUDF_GPU_SEMAPHORE_ENABLED.key}=$semaphoreEnabled " +
-        s"(raw=${conf.getOption(CUDF_GPU_SEMAPHORE_ENABLED.key)})")
-    if (!semaphoreEnabled) {
-      logInfo("GPU semaphore is disabled (cudf.gpuSemaphore.enabled=false), using GpuLock")
-      return
-    }
-
     val gpuMemorySize = conf
       .getOption(CUDF_GPU_MEMORY_SIZE.key)
       .map(_.toLong)
@@ -302,45 +287,31 @@ class VeloxListenerApi extends ListenerApi with Logging {
         detectedGpuMem * memPercent / 100
       }
 
-    val concurrentTasks = conf.getOption(CUDF_CONCURRENT_GPU_TASKS.key).map(_.toInt)
     val gpuBatchBytes =
       conf.getLong(CUDF_GPU_TARGET_BATCH_BYTES.key, CUDF_GPU_TARGET_BATCH_BYTES.defaultValue.get)
-    val defaultConcurrent = concurrentTasks.getOrElse {
-      math.max(2, math.min(4, gpuMemorySize / math.max(gpuBatchBytes, 1))).toInt
+    val concurrentTasks = conf.getOption(CUDF_CONCURRENT_GPU_TASKS.key).map(_.toInt)
+    val maxConcurrent = concurrentTasks.getOrElse {
+      math.max(1, math.min(4, gpuMemorySize / (4 * math.max(gpuBatchBytes, 1)))).toInt
     }
-    val defaultMemPerTask = math.max(gpuMemorySize / math.max(defaultConcurrent, 1), 1)
-    val maxConcurrentTasks =
-      conf.getInt(CUDF_MAX_CONCURRENT_GPU_TASKS.key, 0)
-    val dynamicEnabled =
-      conf.getBoolean(CUDF_CONCURRENT_GPU_TASKS_DYNAMIC.key, true)
-
-    val memoryProvider = if (dynamicEnabled) {
-      try {
-        GpuMemoryTrackerJniWrapper.initialize()
-        logInfo("Native GpuMemoryTracker initialized for dynamic estimation")
-        new RmmGpuMemoryProvider()
-      } catch {
-        case e: UnsatisfiedLinkError =>
-          logWarning(
-            s"GpuMemoryTracker JNI not available, falling back to no-op provider: ${e.getMessage}")
-          org.apache.gluten.gpu.NoOpGpuMemoryProvider
-      }
-    } else {
-      org.apache.gluten.gpu.NoOpGpuMemoryProvider
-    }
-
-    GpuSemaphore.initialize(
-      gpuMemorySize,
-      defaultMemPerTask,
-      maxConcurrentTasks,
-      dynamicEnabled,
-      memoryProvider)
 
     try {
-      GpuMemoryTrackerJniWrapper.setGpuSemaphoreMode(true)
+      GpuMemoryTrackerJniWrapper.setMaxConcurrentGpuTasks(maxConcurrent)
+      logInfo(
+        s"Native GPU concurrency configured: maxConcurrent=$maxConcurrent, " +
+          s"gpuMemory=${gpuMemorySize / (1024 * 1024)}MB, " +
+          s"batchBytes=${gpuBatchBytes / (1024 * 1024)}MB")
     } catch {
-      case _: UnsatisfiedLinkError =>
-        logWarning("setGpuSemaphoreMode JNI not available, C++ GpuLock remains active")
+      case e: UnsatisfiedLinkError =>
+        logWarning(
+          s"setMaxConcurrentGpuTasks JNI not available, using default (serial): ${e.getMessage}")
+    }
+
+    try {
+      GpuMemoryTrackerJniWrapper.initialize()
+      logInfo("Native GpuMemoryTracker initialized")
+    } catch {
+      case e: UnsatisfiedLinkError =>
+        logWarning(s"GpuMemoryTracker JNI not available: ${e.getMessage}")
     }
   }
 

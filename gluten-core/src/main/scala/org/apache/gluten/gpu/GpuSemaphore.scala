@@ -39,6 +39,11 @@ object GpuSemaphore extends Logging {
 
   def memToPermits(memory: Long): Long = math.max(1, memory / PERMIT_MEMORY_SIZE)
 
+  private var maxPermitsValue: Long = Long.MaxValue
+
+  def memToPermitsWithMax(memory: Long): Long =
+    math.min(maxPermitsValue, memToPermits(memory))
+
   /**
    * Initialize the GPU semaphore. Must be called once per executor before any task acquires.
    *
@@ -63,6 +68,7 @@ object GpuSemaphore extends Logging {
       logWarning("GpuSemaphore already initialized, reinitializing.")
       instance.shutdown()
     }
+    maxPermitsValue = memToPermits(gpuMemorySize)
     instance = new GpuSemaphoreImpl(
       gpuMemorySize,
       defaultMemoryPerTask,
@@ -72,7 +78,7 @@ object GpuSemaphore extends Logging {
     logInfo(
       s"GpuSemaphore initialized: gpuMemory=${gpuMemorySize / (1024 * 1024)}MB, " +
         s"defaultPerTask=${defaultMemoryPerTask / (1024 * 1024)}MB, " +
-        s"maxPermits=${memToPermits(gpuMemorySize)}, " +
+        s"maxPermits=$maxPermitsValue, " +
         s"maxConcurrentTasks=$maxConcurrentTasks, dynamic=$dynamicEnabled, " +
         s"memoryProvider=${memoryProvider.getClass.getSimpleName}")
   }
@@ -173,8 +179,14 @@ final private class GpuSemaphoreImpl(
 
   def acquireIfNecessary(context: TaskContext): Unit = {
     val taskAttemptId = context.taskAttemptId()
-    val stageId = context.stageId()
 
+    // Fast re-entrant path: ConcurrentHashMap.get + volatile read, no locks
+    val existing = tasks.get(taskAttemptId)
+    if (existing != null && existing.isHoldingSemaphore) {
+      return
+    }
+
+    val stageId = context.stageId()
     val stageEstimate = stageEstimators.computeIfAbsent(
       stageId,
       _ =>
@@ -184,33 +196,39 @@ final private class GpuSemaphoreImpl(
       taskAttemptId,
       _ => {
         val info = new TaskSemaphoreInfo(stageId, taskAttemptId, stageEstimate)
-        logInfo(
-          s"GpuSemaphore: task $taskAttemptId (stage $stageId) requesting acquire, " +
-            s"active=${semaphore.activeTaskCount}, waiting=${semaphore.waitingCount}")
+        onTaskCompletion(context)
         info
       }
     )
     taskInfo.blockUntilReady(semaphore)
     stageEstimate.addTaskIfNeeded(taskAttemptId)
-    logInfo(
-      s"GpuSemaphore: task $taskAttemptId (stage $stageId) acquired " +
-        s"${taskInfo.getPermitsUsed} permits, active=${semaphore.activeTaskCount}")
   }
 
   def releaseIfNecessary(context: TaskContext): Unit = {
     val taskAttemptId = context.taskAttemptId()
+    val taskInfo = tasks.get(taskAttemptId)
+    if (taskInfo != null) {
+      taskInfo.releaseSemaphore(semaphore)
+    }
+  }
+
+  def completeTask(context: TaskContext): Unit = {
+    val taskAttemptId = context.taskAttemptId()
     val taskInfo = tasks.remove(taskAttemptId)
     if (taskInfo != null) {
-      val permits = taskInfo.getPermitsUsed
       taskInfo.releaseSemaphore(semaphore)
       val estimator = stageEstimators.get(taskInfo.stageId)
       if (estimator != null) {
         estimator.taskDone(taskAttemptId)
       }
-      logInfo(
-        s"GpuSemaphore: task $taskAttemptId (stage ${taskInfo.stageId}) released " +
-          s"$permits permits, active=${semaphore.activeTaskCount}")
+      logDebug(
+        s"GpuSemaphore: task $taskAttemptId (stage ${taskInfo.stageId}) completed, " +
+          s"active=${semaphore.activeTaskCount}")
     }
+  }
+
+  private def onTaskCompletion(context: TaskContext): Unit = {
+    context.addTaskCompletionListener[Unit](_ => completeTask(context))
   }
 
   def activeTaskCount: Long = semaphore.activeTaskCount
@@ -236,11 +254,13 @@ final private class TaskSemaphoreInfo(
   @volatile private var hasSemaphore = false
   private var permitsUsed: Long = 0
 
+  def isHoldingSemaphore: Boolean = hasSemaphore
+
   def blockUntilReady(semaphore: PrioritySemaphore): Unit = synchronized {
     if (hasSemaphore) return
 
     val used = semaphore.acquire(
-      () => GpuSemaphore.memToPermits(stageEstimator.estimate()),
+      () => GpuSemaphore.memToPermitsWithMax(stageEstimator.estimate()),
       priority = taskAttemptId,
       taskId = taskAttemptId
     )

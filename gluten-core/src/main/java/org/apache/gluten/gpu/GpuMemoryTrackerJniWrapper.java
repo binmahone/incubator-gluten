@@ -47,8 +47,8 @@ public final class GpuMemoryTrackerJniWrapper {
   /** Clear tracking data for a completed task. Returns peak memory before removal. */
   public static native long clearTaskMemory(long taskId);
 
-  /** Enable/disable semaphore mode in C++ GpuLock (makes lockGpu/unlockGpu no-ops). */
-  public static native void setGpuSemaphoreMode(boolean enabled);
+  /** Set the max number of concurrent GPU operations in C++ GpuLock (counting semaphore). */
+  public static native void setMaxConcurrentGpuTasks(int maxTasks);
 
   /** Query total device memory in bytes via cudaMemGetInfo. Returns 0 on failure. */
   public static native long getDeviceMemorySize();

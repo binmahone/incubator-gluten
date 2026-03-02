@@ -63,7 +63,7 @@ class GpuMemoryTracker final : public rmm::mr::device_memory_resource {
 
   static GpuMemoryTracker* instance() { return instance_.get(); }
 
-  static void setGpuSemaphoreMode(bool) {}
+  static void setMaxConcurrentGpuTasks(int) {}
 
   // ── Instance API ──────────────────────────────────────────────────────
 
