@@ -138,11 +138,15 @@ arrow::Status VeloxGpuHashShuffleWriter::write(std::shared_ptr<ColumnarBatch> cb
         return gpuPartitionAndEvict(cudfVec);
       }
 
-      // RowVector (not CudfVector) with gpuPartition enabled: data was
-      // pre-partitioned by CudfShufflePartition in the Velox pipeline.
-      // First column = sorted PID, data columns sorted by partition.
-      writtenBytes_ = 0;
-      return prePartitionedEvict(rv);
+      // RowVector (not CudfVector): CudfShufflePartition may or may not
+      // have been in the pipeline. Fall through to the standard CPU path
+      // which correctly handles both pre-partitioned (PID as col 0) and
+      // regular (hash as col 0) data via computePid (pid % numPartitions).
+      if (!gpuPartitionDiagLogged_) {
+        LOG(INFO) << "GPU partition: RowVector (not CudfVector) received, "
+                  << "using CPU shuffle path. rows=" << rv->size()
+                  << " cols=" << rv->childrenSize();
+      }
     }
   } else {
     if (!gpuPartitionDiagLogged_) {
