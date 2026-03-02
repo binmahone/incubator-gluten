@@ -268,7 +268,7 @@ class VeloxListenerApi extends ListenerApi with Logging {
     // SQLConf is not yet bound to a session during onExecutorStart, so it would
     // return default values.
     val semaphoreEnabled =
-      conf.getBoolean(CUDF_GPU_SEMAPHORE_ENABLED.key, false)
+      conf.getBoolean(CUDF_GPU_SEMAPHORE_ENABLED.key, CUDF_GPU_SEMAPHORE_ENABLED.defaultValue.get)
     logInfo(
       s"GPU semaphore config: ${CUDF_GPU_SEMAPHORE_ENABLED.key}=$semaphoreEnabled " +
         s"(raw=${conf.getOption(CUDF_GPU_SEMAPHORE_ENABLED.key)})")
@@ -282,29 +282,31 @@ class VeloxListenerApi extends ListenerApi with Logging {
       .map(_.toLong)
       .getOrElse {
         val memPercent = conf.getInt(CUDF_MEMORY_PERCENT.key, 50)
-        val detectedGpuMem = try {
-          val total = GpuMemoryTrackerJniWrapper.getDeviceMemorySize()
-          if (total > 0) {
-            logInfo(s"Detected GPU device memory: ${total / (1024 * 1024)}MB")
-            total
-          } else {
-            logWarning("cudaMemGetInfo returned 0, falling back to 16GB estimate")
-            16L * 1024 * 1024 * 1024
+        val detectedGpuMem =
+          try {
+            val total = GpuMemoryTrackerJniWrapper.getDeviceMemorySize()
+            if (total > 0) {
+              logInfo(s"Detected GPU device memory: ${total / (1024 * 1024)}MB")
+              total
+            } else {
+              logWarning("cudaMemGetInfo returned 0, falling back to 16GB estimate")
+              16L * 1024 * 1024 * 1024
+            }
+          } catch {
+            case e: UnsatisfiedLinkError =>
+              logWarning(
+                s"getDeviceMemorySize JNI not available, falling back to 16GB estimate: " +
+                  s"${e.getMessage}")
+              16L * 1024 * 1024 * 1024
           }
-        } catch {
-          case e: UnsatisfiedLinkError =>
-            logWarning(
-              s"getDeviceMemorySize JNI not available, falling back to 16GB estimate: " +
-                s"${e.getMessage}")
-            16L * 1024 * 1024 * 1024
-        }
         detectedGpuMem * memPercent / 100
       }
 
     val concurrentTasks = conf.getOption(CUDF_CONCURRENT_GPU_TASKS.key).map(_.toInt)
-    val batchSizeBytes = conf.getLong(GlutenConfig.COLUMNAR_MAX_BATCH_SIZE.key, 4096) * 8L
+    val gpuBatchBytes =
+      conf.getLong(CUDF_GPU_TARGET_BATCH_BYTES.key, CUDF_GPU_TARGET_BATCH_BYTES.defaultValue.get)
     val defaultConcurrent = concurrentTasks.getOrElse {
-      math.max(1, math.min(4, gpuMemorySize / (4 * math.max(batchSizeBytes, 1)))).toInt
+      math.max(2, math.min(4, gpuMemorySize / math.max(gpuBatchBytes, 1))).toInt
     }
     val defaultMemPerTask = math.max(gpuMemorySize / math.max(defaultConcurrent, 1), 1)
     val maxConcurrentTasks =
