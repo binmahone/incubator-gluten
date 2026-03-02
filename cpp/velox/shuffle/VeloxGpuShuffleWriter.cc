@@ -137,6 +137,12 @@ arrow::Status VeloxGpuHashShuffleWriter::write(std::shared_ptr<ColumnarBatch> cb
         writtenBytes_ = 0;
         return gpuPartitionAndEvict(cudfVec);
       }
+
+      // RowVector (not CudfVector) with gpuPartition enabled: data was
+      // pre-partitioned by CudfShufflePartition in the Velox pipeline.
+      // First column = sorted PID, data columns sorted by partition.
+      writtenBytes_ = 0;
+      return prePartitionedEvict(rv);
     }
   } else {
     if (!gpuPartitionDiagLogged_) {
@@ -147,6 +153,61 @@ arrow::Status VeloxGpuHashShuffleWriter::write(std::shared_ptr<ColumnarBatch> cb
   }
 
   return VeloxHashShuffleWriter::write(cb, memLimit);
+}
+
+arrow::Status VeloxGpuHashShuffleWriter::prePartitionedEvict(
+    const facebook::velox::RowVectorPtr& rv) {
+  VELOX_CHECK_GT(rv->childrenSize(), 0, "RowVector must have at least PID column");
+
+  // Strip first column (PID) to get data-only RowVector for schema init.
+  auto strippedRv = getStrippedRowVector(*rv);
+
+  // Initialize schema from the stripped RowVector (data cols only) on first batch.
+  if (!gpuSchemaInitialized_) {
+    gpuSchemaInitialized_ = true;
+    RETURN_NOT_OK(initFromRowVector(*strippedRv));
+    LOG(INFO) << "GPU prePartitionedEvict: schema initialized from "
+              << strippedRv->childrenSize() << " data columns";
+  }
+
+  // Complex types not supported in this fast path.
+  if (hasComplexType_) {
+    auto cpuBatch = std::make_shared<VeloxColumnarBatch>(rv);
+    return VeloxHashShuffleWriter::write(cpuBatch, 0);
+  }
+
+  // First column is sorted PID (0,0,...,0,1,1,...,1,2,2,...).
+  auto* pidVector = rv->childAt(0)->asFlatVector<int32_t>();
+  VELOX_CHECK_NOT_NULL(pidVector, "First column must be flat int32 (PID)");
+  const auto* pidData = pidVector->rawValues();
+  const auto numRows = rv->size();
+
+  // Scan sorted PID column to find partition boundaries.
+  std::vector<int64_t> offsets(numPartitions_ + 1, 0);
+  offsets[numPartitions_] = numRows;
+  int32_t currentPid = 0;
+  for (int64_t i = 0; i < numRows; ++i) {
+    while (currentPid < pidData[i]) {
+      offsets[++currentPid] = i;
+    }
+  }
+  while (currentPid < static_cast<int32_t>(numPartitions_)) {
+    offsets[++currentPid] = numRows;
+  }
+
+  // Sequential extract per partition from the stripped RowVector.
+  for (uint32_t pid = 0; pid < numPartitions_; ++pid) {
+    auto start = offsets[pid];
+    auto count = static_cast<uint32_t>(offsets[pid + 1] - offsets[pid]);
+    if (count == 0) {
+      continue;
+    }
+    std::vector<std::shared_ptr<arrow::Buffer>> buffers;
+    RETURN_NOT_OK(extractBuffersFromRowVector(*strippedRv, start, count, buffers));
+    RETURN_NOT_OK(evictBuffers(pid, count, std::move(buffers), false));
+  }
+
+  return arrow::Status::OK();
 }
 
 arrow::Status VeloxGpuHashShuffleWriter::gpuPartitionAndEvict(

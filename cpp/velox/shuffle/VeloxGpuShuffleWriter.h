@@ -63,6 +63,11 @@ class VeloxGpuHashShuffleWriter : public VeloxHashShuffleWriter {
   arrow::Status gpuPartitionAndEvict(
       const std::shared_ptr<facebook::velox::cudf_velox::CudfVector>& cudfVec);
 
+  // Fast path for data pre-partitioned by CudfShufflePartition in the pipeline.
+  // The RowVector's first column contains sorted PIDs; scan for boundaries and
+  // use extractBuffersFromRowVector per partition (sequential memcpy, no scatter).
+  arrow::Status prePartitionedEvict(const facebook::velox::RowVectorPtr& rv);
+
   // Extract flat buffer list from a range [start, start+numRows) of a Velox RowVector
   // in the format expected by InMemoryPayload. Works on the full (non-sliced) RowVector
   // to avoid offset complications. Handles bool bit→byte, timestamp int128→int64, etc.

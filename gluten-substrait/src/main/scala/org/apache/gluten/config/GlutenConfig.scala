@@ -1595,6 +1595,14 @@ object GlutenConfig extends ConfigRegistry {
       .booleanConf
       .createWithDefault(false)
 
+  val COLUMNAR_CUDF_SHUFFLE_NUM_PARTITIONS =
+    buildConf("spark.gluten.sql.columnar.cudf.shuffleNumPartitions")
+      .internal()
+      .doc("Set by ColumnarShuffleWriter so the Velox pipeline can insert " +
+        "CudfShufflePartition before CudfToVelox D2H. 0 means disabled.")
+      .intConf
+      .createWithDefault(0)
+
   val COLUMNAR_COLLECT_TAIL_ENABLED =
     buildConf("spark.gluten.sql.columnar.collectTail")
       .doc("Enable or disable columnar collectTail.")

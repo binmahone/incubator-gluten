@@ -786,6 +786,13 @@ std::unordered_map<std::string, std::string> WholeStageResultIterator::getQueryC
 
 #ifdef GLUTEN_ENABLE_GPU
     configs[velox::cudf_velox::CudfConfig::kCudfEnabled] = std::to_string(veloxCfg_->get<bool>(kCudfEnabled, false));
+    {
+      auto shuffleNumPartitions =
+          veloxCfg_->get<int32_t>(kCudfShuffleNumPartitions, kCudfShuffleNumPartitionsDefault);
+      if (shuffleNumPartitions > 0) {
+        configs["cudf.shuffle_num_partitions"] = std::to_string(shuffleNumPartitions);
+      }
+    }
 #endif
 
     const auto setIfExists = [&](const std::string& glutenKey, const std::string& veloxKey) {
