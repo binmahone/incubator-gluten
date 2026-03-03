@@ -28,6 +28,7 @@ import org.apache.spark.internal.Logging
 import org.apache.spark.internal.config.{SHUFFLE_COMPRESS, SHUFFLE_DISK_WRITE_BUFFER_SIZE, SHUFFLE_FILE_BUFFER_SIZE, SHUFFLE_SORT_INIT_BUFFER_SIZE, SHUFFLE_SORT_USE_RADIXSORT}
 import org.apache.spark.memory.SparkMemoryUtil
 import org.apache.spark.scheduler.MapStatus
+import org.apache.spark.sql.internal.SQLConf
 import org.apache.spark.sql.vectorized.ColumnarBatch
 import org.apache.spark.util.{SparkDirectoryUtil, SparkResourceUtil, Utils}
 
@@ -55,6 +56,12 @@ class ColumnarShuffleWriter[K, V](
   protected val isSort: Boolean = dep.shuffleWriterType == SortShuffleWriterType
 
   private val numPartitions: Int = dep.partitioner.numPartitions
+
+  if (dep.shuffleWriterType == GpuHashShuffleWriterType &&
+      GlutenConfig.get.enableCudfGpuPartition) {
+    SQLConf.get.setConfString(
+      GlutenConfig.COLUMNAR_CUDF_GPU_SHUFFLE_OUTPUT.key, "true")
+  }
 
   private val conf = SparkEnv.get.conf
 
