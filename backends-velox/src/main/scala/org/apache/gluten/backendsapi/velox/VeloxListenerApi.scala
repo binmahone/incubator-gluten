@@ -136,7 +136,7 @@ class VeloxListenerApi extends ListenerApi with Logging {
     UdfJniWrapper.registerFunctionSignatures()
 
     if (inLocalMode(conf)) {
-      initializeGpuSemaphore(conf)
+      initializeGpuConcurrency(conf)
     }
   }
 
@@ -170,7 +170,7 @@ class VeloxListenerApi extends ListenerApi with Logging {
 
     SparkDirectoryUtil.init(conf)
     initialize(conf, isDriver = false)
-    initializeGpuSemaphore(conf)
+    initializeGpuConcurrency(conf)
     addIfNeedMemoryDumpShutdownHook(conf)
   }
 
@@ -256,7 +256,7 @@ class VeloxListenerApi extends ListenerApi with Logging {
     GlutenFormatFactory.register(new VeloxRowSplitter())
   }
 
-  private def initializeGpuSemaphore(conf: SparkConf): Unit = {
+  private def initializeGpuConcurrency(conf: SparkConf): Unit = {
     val cudfEnabled = conf.getBoolean(GlutenConfig.COLUMNAR_CUDF_ENABLED.key, false)
     if (!cudfEnabled) {
       return
@@ -274,7 +274,7 @@ class VeloxListenerApi extends ListenerApi with Logging {
               logInfo(s"Detected GPU device memory: ${total / (1024 * 1024)}MB")
               total
             } else {
-              logWarning("cudaMemGetInfo returned 0, falling back to 16GB estimate")
+              logWarning("GPU memory detection returned 0, falling back to 16GB estimate")
               16L * 1024 * 1024 * 1024
             }
           } catch {
@@ -297,7 +297,7 @@ class VeloxListenerApi extends ListenerApi with Logging {
     try {
       GpuMemoryTrackerJniWrapper.setMaxConcurrentGpuTasks(maxConcurrent)
       logInfo(
-        s"Native GPU concurrency configured: maxConcurrent=$maxConcurrent, " +
+        s"C++ GpuLock configured: maxConcurrent=$maxConcurrent, " +
           s"gpuMemory=${gpuMemorySize / (1024 * 1024)}MB, " +
           s"batchBytes=${gpuBatchBytes / (1024 * 1024)}MB")
     } catch {

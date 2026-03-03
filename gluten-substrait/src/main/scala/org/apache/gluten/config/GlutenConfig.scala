@@ -1598,7 +1598,6 @@ object GlutenConfig extends ConfigRegistry {
       .booleanConf
       .createWithDefault(true)
 
-
   val COLUMNAR_COLLECT_TAIL_ENABLED =
     buildConf("spark.gluten.sql.columnar.collectTail")
       .doc("Enable or disable columnar collectTail.")

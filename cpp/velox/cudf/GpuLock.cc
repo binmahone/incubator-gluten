@@ -16,7 +16,6 @@
  */
 
 #include "GpuLock.h"
-#include <atomic>
 #include <condition_variable>
 #include <mutex>
 #include <glog/logging.h>

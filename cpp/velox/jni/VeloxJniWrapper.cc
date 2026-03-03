@@ -910,12 +910,47 @@ JNIEXPORT jlong JNICALL Java_org_apache_gluten_gpu_GpuMemoryTrackerJniWrapper_ge
     JNIEnv* env,
     jclass) {
   JNI_METHOD_START
+  int deviceId = 0;
+  cudaGetDevice(&deviceId);
+
+  cudaDeviceProp prop;
+  auto propErr = cudaGetDeviceProperties(&prop, deviceId);
+  size_t propTotalMem = 0;
+  if (propErr == cudaSuccess) {
+    propTotalMem = prop.totalGlobalMem;
+    LOG(INFO) << "GPU device " << deviceId << ": " << prop.name
+              << ", totalGlobalMem=" << (propTotalMem >> 20) << "MB"
+              << ", unifiedAddressing=" << prop.unifiedAddressing
+              << ", pageableMemoryAccess=" << prop.pageableMemoryAccess
+              << ", concurrentManagedAccess=" << prop.concurrentManagedAccess;
+  } else {
+    LOG(WARNING) << "cudaGetDeviceProperties failed: " << cudaGetErrorString(propErr);
+  }
+
   size_t freeMem = 0, totalMem = 0;
   auto err = cudaMemGetInfo(&freeMem, &totalMem);
   if (err != cudaSuccess) {
     LOG(WARNING) << "cudaMemGetInfo failed: " << cudaGetErrorString(err);
+    if (propTotalMem > 0) {
+      LOG(INFO) << "Using totalGlobalMem from device properties: " << (propTotalMem >> 20) << "MB";
+      return static_cast<jlong>(propTotalMem);
+    }
     return 0;
   }
+
+  LOG(INFO) << "cudaMemGetInfo: total=" << (totalMem >> 20)
+            << "MB, free=" << (freeMem >> 20) << "MB";
+
+  // On GH200 and other unified memory architectures, cudaMemGetInfo may
+  // report only the device-local portion. Use the larger of the two values.
+  if (propTotalMem > totalMem) {
+    LOG(WARNING) << "cudaMemGetInfo total (" << (totalMem >> 20)
+                 << "MB) < cudaGetDeviceProperties totalGlobalMem ("
+                 << (propTotalMem >> 20) << "MB). "
+                 << "Using device properties value (likely unified memory arch).";
+    return static_cast<jlong>(propTotalMem);
+  }
+
   return static_cast<jlong>(totalMem);
   JNI_METHOD_END(0)
 }
