@@ -110,20 +110,22 @@ arrow::Status VeloxGpuHashShuffleWriter::write(std::shared_ptr<ColumnarBatch> cb
                   << " numRows=" << cb->numRows();
       }
       if (cudfVec) {
-        // First batch: D2H and run through CPU path to initialize schema metadata.
-        // Then flush partition buffers so subsequent GPU-path evicts don't reorder.
+        // Schema initialization from first CudfVector batch.
         if (!gpuSchemaInitialized_) {
           gpuSchemaInitialized_ = true;
           LOG(INFO) << "GPU partition: first CudfVector batch, rows=" << cudfVec->size()
                     << " cols=" << cudfVec->getTableView().num_columns();
           auto cpuRv = cudf_velox::with_arrow::toVeloxColumn(
               cudfVec->getTableView(), veloxPool_.get(), std::string(""), cudfVec->stream());
-          auto cpuBatch = std::make_shared<VeloxColumnarBatch>(cpuRv);
-          RETURN_NOT_OK(VeloxHashShuffleWriter::write(cpuBatch, memLimit));
-          for (uint32_t pid = 0; pid < numPartitions_; ++pid) {
-            RETURN_NOT_OK(evictPartitionBuffers(pid, false));
+          auto strippedRv = getStrippedRowVector(*cpuRv);
+          RETURN_NOT_OK(initFromRowVector(*strippedRv));
+          LOG(INFO) << "GPU partition: schema initialized, "
+                    << strippedRv->childrenSize() << " data columns, "
+                    << "hasComplexType=" << hasComplexType_;
+          if (hasComplexType_) {
+            auto cpuBatch = std::make_shared<VeloxColumnarBatch>(cpuRv);
+            return VeloxHashShuffleWriter::write(cpuBatch, memLimit);
           }
-          return arrow::Status::OK();
         }
 
         // Complex types not yet supported in GPU path.
