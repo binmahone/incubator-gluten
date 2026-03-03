@@ -24,12 +24,10 @@
 #include "velox/connectors/hive/HiveConnectorSplit.h"
 #include "velox/exec/PlanNodeStats.h"
 #ifdef GLUTEN_ENABLE_GPU
-#include <optional>
 #include <cudf/io/types.hpp>
 #include "velox/experimental/cudf/CudfConfig.h"
 #include "velox/experimental/cudf/connectors/hive/CudfHiveConnectorSplit.h"
 #include "velox/experimental/cudf/exec/ToCudf.h"
-#include "cudf/GpuLock.h"
 #endif
 #include "operators/plannodes/RowVectorStream.h"
 
@@ -313,17 +311,16 @@ std::shared_ptr<ColumnarBatch> WholeStageResultIterator::next() {
   }
   velox::RowVectorPtr vector;
 
-#ifdef GLUTEN_ENABLE_GPU
-  // RAII guard: hold GPU lock for the entire pipeline execution (scan → cudf
-  // compute → CudfToVelox D2H). Released automatically when guard goes out of
-  // scope — safe even if task_->next() throws. Reentrant: CudfHiveDataSource's
-  // inner GpuGuard and VeloxGpuColumnarBatchSerializer's GpuLockGuard nest
-  // safely via ref-counting.
-  std::optional<GpuLockGuard> gpuGuard;
-  if (enableCudf_) {
-    gpuGuard.emplace();
-  }
-#endif
+  // GPU locking is NOT applied at this level. The pipeline (task_->next())
+  // contains both GPU work (cuDF operators, D2H) and CPU work (Parquet I/O,
+  // operator scheduling). Serializing the entire pipeline with maxConcurrent=1
+  // blocks multi-task CPU parallelism and causes 12-21% regression.
+  //
+  // Instead, each GPU-touching component manages its own lock:
+  //   - CudfHiveDataSource: GpuGuard around scan/H2D
+  //   - VeloxGpuColumnarBatchSerializer: GpuLockGuard around deserialize H2D
+  //   - GpuBufferBatchResizer / CudfVectorStream: GpuLockGuard around H2D
+  // cuDF operators are stream-safe (per-op streams) and RMM is thread-safe.
 
   while (true) {
     auto future = velox::ContinueFuture::makeEmpty();
@@ -340,10 +337,6 @@ std::shared_ptr<ColumnarBatch> WholeStageResultIterator::next() {
             << taskStateString(task_->state());
     future.wait();
   }
-
-#ifdef GLUTEN_ENABLE_GPU
-  gpuGuard.reset();
-#endif
 
   if (vector == nullptr) {
     return nullptr;
