@@ -202,8 +202,13 @@ class VeloxIteratorApi extends IteratorApi with Logging {
       iter => new ColumnarBatchInIterator(BackendsApiManager.getBackendName, iter.asJava)
     }
 
-    val extraConf = Map(GlutenConfig.COLUMNAR_CUDF_ENABLED.key -> enableCudf.toString).asJava
-    val transKernel = NativePlanEvaluator.create(BackendsApiManager.getBackendName, extraConf)
+    val extraConfMap = scala.collection.mutable.Map(
+      GlutenConfig.COLUMNAR_CUDF_ENABLED.key -> enableCudf.toString)
+    if (GlutenConfig.gpuShuffleOutputFlag.get()) {
+      extraConfMap += (GlutenConfig.COLUMNAR_CUDF_GPU_SHUFFLE_OUTPUT.key -> "true")
+    }
+    val transKernel = NativePlanEvaluator.create(
+      BackendsApiManager.getBackendName, extraConfMap.asJava)
 
     val splitInfoByteArray = inputPartition
       .asInstanceOf[GlutenPartition]
@@ -261,8 +266,13 @@ class VeloxIteratorApi extends IteratorApi with Logging {
       trySetCurrentTask(context)
     }
 
-    val extraConf = Map(GlutenConfig.COLUMNAR_CUDF_ENABLED.key -> enableCudf.toString).asJava
-    val transKernel = NativePlanEvaluator.create(BackendsApiManager.getBackendName, extraConf)
+    val extraConfMap = scala.collection.mutable.Map(
+      GlutenConfig.COLUMNAR_CUDF_ENABLED.key -> enableCudf.toString)
+    if (GlutenConfig.gpuShuffleOutputFlag.get()) {
+      extraConfMap += (GlutenConfig.COLUMNAR_CUDF_GPU_SHUFFLE_OUTPUT.key -> "true")
+    }
+    val transKernel = NativePlanEvaluator.create(
+      BackendsApiManager.getBackendName, extraConfMap.asJava)
     val columnarNativeIterator =
       inputIterators.map {
         iter => new ColumnarBatchInIterator(BackendsApiManager.getBackendName, iter.asJava)

@@ -782,6 +782,7 @@ std::unordered_map<std::string, std::string> WholeStageResultIterator::getQueryC
     configs[velox::cudf_velox::CudfConfig::kCudfEnabled] = std::to_string(veloxCfg_->get<bool>(kCudfEnabled, false));
     {
       auto gpuShuffleOutput = veloxCfg_->get<bool>(kCudfGpuShuffleOutput, false);
+      LOG(INFO) << "WholeStageResultIterator: gpuShuffleOutput=" << gpuShuffleOutput;
       if (gpuShuffleOutput) {
         configs["cudf.gpu_shuffle_output"] = "true";
       }
