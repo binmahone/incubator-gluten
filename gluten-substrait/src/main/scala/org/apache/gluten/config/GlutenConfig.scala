@@ -471,7 +471,6 @@ object GlutenConfig extends ConfigRegistry {
     SHUFFLE_WRITER_BUFFER_SIZE.key,
     COLUMNAR_CUDF_ENABLED.key,
     COLUMNAR_CUDF_GPU_PARTITION.key,
-    COLUMNAR_CUDF_SHUFFLE_NUM_PARTITIONS.key,
     SQLConf.LEGACY_SIZE_OF_NULL.key,
     SQLConf.LEGACY_STATISTICAL_AGGREGATE.key,
     SQLConf.JSON_GENERATOR_IGNORE_NULL_FIELDS.key,
@@ -1593,17 +1592,10 @@ object GlutenConfig extends ConfigRegistry {
     buildConf("spark.gluten.sql.columnar.cudf.gpuPartition")
       .experimental()
       .doc("When cudf is enabled, perform shuffle partitioning on GPU instead of CPU. " +
-        "Moves hash-mod and data reordering to GPU, then does a single D2H transfer.")
+        "Moves hash-mod and data reordering to GPU, then does a single D2H transfer. " +
+        "Enabled by default when cudf is active.")
       .booleanConf
-      .createWithDefault(false)
-
-  val COLUMNAR_CUDF_SHUFFLE_NUM_PARTITIONS =
-    buildConf("spark.gluten.sql.columnar.cudf.shuffleNumPartitions")
-      .internal()
-      .doc("Set by ColumnarShuffleWriter so the Velox pipeline can insert " +
-        "CudfShufflePartition before CudfToVelox D2H. 0 means disabled.")
-      .intConf
-      .createWithDefault(0)
+      .createWithDefault(true)
 
   val COLUMNAR_COLLECT_TAIL_ENABLED =
     buildConf("spark.gluten.sql.columnar.collectTail")

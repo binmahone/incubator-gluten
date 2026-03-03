@@ -223,11 +223,11 @@ const std::string kCudfHostAsPinnedThresholdDefault = "0";
 const std::string kCudfPackedDtoH = "spark.gluten.sql.columnar.backend.velox.cudf.packedDtoH";
 const std::string kCudfPackedDtoHDefault = "true";
 
-// Number of shuffle output partitions.  Set by ColumnarShuffleWriter so that
-// the Velox pipeline can insert CudfShufflePartition (GPU cudf::partition)
-// before CudfToVelox D2H.  0 means disabled (no GPU shuffle partition).
-const std::string kCudfShuffleNumPartitions = "spark.gluten.sql.columnar.cudf.shuffleNumPartitions";
-const int32_t kCudfShuffleNumPartitionsDefault = 0;
+// When true, the pipeline skips CudfToVelox for the last operator of the
+// output driver, letting CudfVector flow directly to the shuffle writer's
+// gpuPartitionAndEvict (GPU-side partition + D2H).
+const std::string kCudfGpuPartition = "spark.gluten.sql.columnar.cudf.gpuPartition";
+const bool kCudfGpuPartitionDefault = true;
 
 const std::string kStaticBackendConfPrefix = "spark.gluten.velox.";
 const std::string kDynamicBackendConfPrefix = "spark.gluten.sql.columnar.backend.velox.";

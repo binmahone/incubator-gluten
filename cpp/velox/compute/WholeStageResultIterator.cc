@@ -781,11 +781,10 @@ std::unordered_map<std::string, std::string> WholeStageResultIterator::getQueryC
 #ifdef GLUTEN_ENABLE_GPU
     configs[velox::cudf_velox::CudfConfig::kCudfEnabled] = std::to_string(veloxCfg_->get<bool>(kCudfEnabled, false));
     {
-      auto shuffleNumPartitions =
-          veloxCfg_->get<int32_t>(kCudfShuffleNumPartitions, kCudfShuffleNumPartitionsDefault);
-      LOG(INFO) << "GPU shuffle config: shuffleNumPartitions=" << shuffleNumPartitions;
-      if (shuffleNumPartitions > 0) {
-        configs["cudf.shuffle_num_partitions"] = std::to_string(shuffleNumPartitions);
+      auto gpuPartition = veloxCfg_->get<bool>(kCudfGpuPartition, kCudfGpuPartitionDefault);
+      if (gpuPartition) {
+        configs["cudf.gpu_partition"] = "true";
+        LOG(INFO) << "GPU shuffle: gpuPartition=true, CudfVector will skip D2H for shuffle output";
       }
     }
 #endif
