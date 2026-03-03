@@ -56,9 +56,16 @@ class ColumnarShuffleWriter[K, V](
 
   private val numPartitions: Int = dep.partitioner.numPartitions
 
-  if (dep.shuffleWriterType == GpuHashShuffleWriterType &&
-      GlutenConfig.get.enableCudfGpuPartition) {
-    GlutenConfig.gpuShuffleOutputFlag.set(true)
+  {
+    val isGpuType = dep.shuffleWriterType == GpuHashShuffleWriterType
+    val gpuPartEnabled = GlutenConfig.get.enableCudfGpuPartition
+    if (isGpuType && gpuPartEnabled) {
+      GlutenConfig.gpuShuffleOutputFlag.set(true)
+    }
+    logWarning(
+      s"ColumnarShuffleWriter: shuffleWriterType=${dep.shuffleWriterType.name}" +
+        s" isGpuType=$isGpuType gpuPartEnabled=$gpuPartEnabled" +
+        s" threadLocalSet=${GlutenConfig.gpuShuffleOutputFlag.get()}")
   }
 
   private val conf = SparkEnv.get.conf

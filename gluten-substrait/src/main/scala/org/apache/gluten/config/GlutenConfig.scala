@@ -392,9 +392,9 @@ class GlutenConfig(conf: SQLConf) extends GlutenCoreConfig(conf) {
 object GlutenConfig extends ConfigRegistry {
 
   /**
-   * Per-task thread-local flag set by ColumnarShuffleWriter when GPU shuffle
-   * partition is enabled. Read by VeloxIteratorApi to pass as extraConf to the
-   * pipeline Runtime, bypassing SQLConf (which is read-only in task context).
+   * Per-task thread-local flag set by ColumnarShuffleWriter when GPU shuffle partition is enabled.
+   * Read by VeloxIteratorApi to pass as extraConf to the pipeline Runtime, bypassing SQLConf (which
+   * is read-only in task context).
    */
   val gpuShuffleOutputFlag: ThreadLocal[java.lang.Boolean] =
     ThreadLocal.withInitial[java.lang.Boolean](() => false)
@@ -1598,18 +1598,20 @@ object GlutenConfig extends ConfigRegistry {
   val COLUMNAR_CUDF_GPU_PARTITION =
     buildConf("spark.gluten.sql.columnar.cudf.gpuPartition")
       .experimental()
-      .doc("When cudf is enabled, perform shuffle partitioning on GPU instead of CPU. " +
-        "Moves hash-mod and data reordering to GPU, then does a single D2H transfer. " +
-        "Enabled by default when cudf is active.")
+      .doc(
+        "When cudf is enabled, perform shuffle partitioning on GPU instead of CPU. " +
+          "Moves hash-mod and data reordering to GPU, then does a single D2H transfer. " +
+          "Enabled by default when cudf is active.")
       .booleanConf
       .createWithDefault(true)
 
   val COLUMNAR_CUDF_GPU_SHUFFLE_OUTPUT =
     buildConf("spark.gluten.sql.columnar.cudf.gpuShuffleOutput")
       .internal()
-      .doc("Per-task flag set by ColumnarShuffleWriter when GPU partition is enabled. " +
-        "Tells the Velox pipeline to skip CudfToVelox D2H so CudfVector flows " +
-        "directly to the GPU shuffle writer. Not a user-facing config.")
+      .doc(
+        "Per-task flag set by ColumnarShuffleWriter when GPU partition is enabled. " +
+          "Tells the Velox pipeline to skip CudfToVelox D2H so CudfVector flows " +
+          "directly to the GPU shuffle writer. Not a user-facing config.")
       .booleanConf
       .createWithDefault(false)
 

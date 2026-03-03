@@ -202,13 +202,16 @@ class VeloxIteratorApi extends IteratorApi with Logging {
       iter => new ColumnarBatchInIterator(BackendsApiManager.getBackendName, iter.asJava)
     }
 
-    val extraConfMap = scala.collection.mutable.Map(
-      GlutenConfig.COLUMNAR_CUDF_ENABLED.key -> enableCudf.toString)
-    if (GlutenConfig.gpuShuffleOutputFlag.get()) {
+    val gpuShuffleFlag = GlutenConfig.gpuShuffleOutputFlag.get()
+    GlutenConfig.gpuShuffleOutputFlag.set(false)
+    val extraConfMap =
+      scala.collection.mutable.Map(GlutenConfig.COLUMNAR_CUDF_ENABLED.key -> enableCudf.toString)
+    if (gpuShuffleFlag) {
       extraConfMap += (GlutenConfig.COLUMNAR_CUDF_GPU_SHUFFLE_OUTPUT.key -> "true")
     }
-    val transKernel = NativePlanEvaluator.create(
-      BackendsApiManager.getBackendName, extraConfMap.asJava)
+    logWarning(s"genFirstStageIterator: gpuShuffleFlag=$gpuShuffleFlag extraConf=$extraConfMap")
+    val transKernel =
+      NativePlanEvaluator.create(BackendsApiManager.getBackendName, extraConfMap.asJava)
 
     val splitInfoByteArray = inputPartition
       .asInstanceOf[GlutenPartition]
@@ -266,13 +269,15 @@ class VeloxIteratorApi extends IteratorApi with Logging {
       trySetCurrentTask(context)
     }
 
-    val extraConfMap = scala.collection.mutable.Map(
-      GlutenConfig.COLUMNAR_CUDF_ENABLED.key -> enableCudf.toString)
-    if (GlutenConfig.gpuShuffleOutputFlag.get()) {
+    val gpuShuffleFlagFinal = GlutenConfig.gpuShuffleOutputFlag.get()
+    GlutenConfig.gpuShuffleOutputFlag.set(false)
+    val extraConfMap =
+      scala.collection.mutable.Map(GlutenConfig.COLUMNAR_CUDF_ENABLED.key -> enableCudf.toString)
+    if (gpuShuffleFlagFinal) {
       extraConfMap += (GlutenConfig.COLUMNAR_CUDF_GPU_SHUFFLE_OUTPUT.key -> "true")
     }
-    val transKernel = NativePlanEvaluator.create(
-      BackendsApiManager.getBackendName, extraConfMap.asJava)
+    val transKernel =
+      NativePlanEvaluator.create(BackendsApiManager.getBackendName, extraConfMap.asJava)
     val columnarNativeIterator =
       inputIterators.map {
         iter => new ColumnarBatchInIterator(BackendsApiManager.getBackendName, iter.asJava)

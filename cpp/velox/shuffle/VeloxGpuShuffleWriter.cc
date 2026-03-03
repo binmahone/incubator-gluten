@@ -102,7 +102,7 @@ arrow::Status VeloxGpuHashShuffleWriter::write(std::shared_ptr<ColumnarBatch> cb
       auto cudfVec = std::dynamic_pointer_cast<CudfVector>(rv);
       if (!gpuPartitionDiagLogged_) {
         gpuPartitionDiagLogged_ = true;
-        LOG(INFO) << "GPU partition diag: batchType=" << cb->getType()
+        LOG(WARNING) << "GPU partition diag: batchType=" << cb->getType()
                   << " veloxBatch=" << (veloxBatch != nullptr)
                   << " rvType=" << (rv ? rv->type()->toString() : "null")
                   << " rvTypeName=" << (rv ? typeid(*rv).name() : "null")
@@ -113,13 +113,13 @@ arrow::Status VeloxGpuHashShuffleWriter::write(std::shared_ptr<ColumnarBatch> cb
         // Schema initialization from first CudfVector batch.
         if (!gpuSchemaInitialized_) {
           gpuSchemaInitialized_ = true;
-          LOG(INFO) << "GPU partition: first CudfVector batch, rows=" << cudfVec->size()
+          LOG(WARNING) << "GPU partition: first CudfVector batch, rows=" << cudfVec->size()
                     << " cols=" << cudfVec->getTableView().num_columns();
           auto cpuRv = cudf_velox::with_arrow::toVeloxColumn(
               cudfVec->getTableView(), veloxPool_.get(), std::string(""), cudfVec->stream());
           auto strippedRv = getStrippedRowVector(*cpuRv);
           RETURN_NOT_OK(initFromRowVector(*strippedRv));
-          LOG(INFO) << "GPU partition: schema initialized, "
+          LOG(WARNING) << "GPU partition: schema initialized, "
                     << strippedRv->childrenSize() << " data columns, "
                     << "hasComplexType=" << hasComplexType_;
           if (hasComplexType_) {
@@ -145,7 +145,7 @@ arrow::Status VeloxGpuHashShuffleWriter::write(std::shared_ptr<ColumnarBatch> cb
       // which correctly handles both pre-partitioned (PID as col 0) and
       // regular (hash as col 0) data via computePid (pid % numPartitions).
       if (!gpuPartitionDiagLogged_) {
-        LOG(INFO) << "GPU partition: RowVector (not CudfVector) received, "
+        LOG(WARNING) << "GPU partition: RowVector (not CudfVector) received, "
                   << "using CPU shuffle path. rows=" << rv->size()
                   << " cols=" << rv->childrenSize();
       }
@@ -221,6 +221,11 @@ arrow::Status VeloxGpuHashShuffleWriter::gpuPartitionAndEvict(
   auto tableView = cudfVec->getTableView();
   auto stream = cudfVec->stream();
 
+  LOG(WARNING) << "gpuPartitionAndEvict: input rows=" << tableView.num_rows()
+               << " cols=" << tableView.num_columns()
+               << " numPartitions=" << numPartitions_
+               << " partitioning=" << static_cast<int>(partitioning_);
+
   // First column carries partition info (hash value for kHash, PID for kRange).
   auto firstCol = tableView.column(0);
 
@@ -256,12 +261,26 @@ arrow::Status VeloxGpuHashShuffleWriter::gpuPartitionAndEvict(
       dataTable, pidColView, static_cast<cudf::size_type>(numPartitions_), stream);
   VELOX_CHECK_EQ(offsets.size(), numPartitions_ + 1);
 
+  uint64_t totalEvicted = 0;
+  for (uint32_t i = 0; i < numPartitions_; ++i) {
+    totalEvicted += (offsets[i + 1] - offsets[i]);
+  }
+  LOG(WARNING) << "gpuPartitionAndEvict: partitioned rows=" << partitionedTable->num_rows()
+               << " dataCols=" << partitionedTable->num_columns()
+               << " totalInOffsets=" << totalEvicted
+               << " offsets[0]=" << offsets[0]
+               << " offsets[last]=" << offsets[numPartitions_];
+
   // Single D2H: convert the entire partitioned table to a Velox RowVector.
   auto veloxRv = cudf_velox::with_arrow::toVeloxColumn(
       partitionedTable->view(), veloxPool_.get(), std::string(""), stream);
 
+  LOG(WARNING) << "gpuPartitionAndEvict: veloxRv rows=" << veloxRv->size()
+               << " children=" << veloxRv->childrenSize();
+
   // CPU-side: extract buffers per partition directly from the full RowVector
   // using offsets (avoids sliced-vector offset pitfalls and enables zero-copy).
+  uint64_t totalRowsEvicted = 0;
   for (uint32_t pid = 0; pid < numPartitions_; ++pid) {
     auto start = static_cast<int64_t>(offsets[pid]);
     auto numRows = static_cast<uint32_t>(offsets[pid + 1] - offsets[pid]);
@@ -272,8 +291,10 @@ arrow::Status VeloxGpuHashShuffleWriter::gpuPartitionAndEvict(
     std::vector<std::shared_ptr<arrow::Buffer>> buffers;
     RETURN_NOT_OK(extractBuffersFromRowVector(*veloxRv, start, numRows, buffers));
     RETURN_NOT_OK(evictBuffers(pid, numRows, std::move(buffers), false));
+    totalRowsEvicted += numRows;
   }
 
+  LOG(WARNING) << "gpuPartitionAndEvict: totalRowsEvicted=" << totalRowsEvicted;
   return arrow::Status::OK();
 }
 
