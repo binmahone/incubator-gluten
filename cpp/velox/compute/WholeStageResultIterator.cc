@@ -783,6 +783,7 @@ std::unordered_map<std::string, std::string> WholeStageResultIterator::getQueryC
     {
       auto shuffleNumPartitions =
           veloxCfg_->get<int32_t>(kCudfShuffleNumPartitions, kCudfShuffleNumPartitionsDefault);
+      LOG(INFO) << "GPU shuffle config: shuffleNumPartitions=" << shuffleNumPartitions;
       if (shuffleNumPartitions > 0) {
         configs["cudf.shuffle_num_partitions"] = std::to_string(shuffleNumPartitions);
       }
