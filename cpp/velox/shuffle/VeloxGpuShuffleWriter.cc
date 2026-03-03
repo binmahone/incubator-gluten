@@ -110,30 +110,34 @@ arrow::Status VeloxGpuHashShuffleWriter::write(std::shared_ptr<ColumnarBatch> cb
                   << " numRows=" << cb->numRows();
       }
       if (cudfVec) {
-        // Schema initialization from first CudfVector batch.
         if (!gpuSchemaInitialized_) {
           gpuSchemaInitialized_ = true;
-          LOG(WARNING) << "GPU partition: first CudfVector batch, rows=" << cudfVec->size()
-                    << " cols=" << cudfVec->getTableView().num_columns();
-          auto cpuRv = cudf_velox::with_arrow::toVeloxColumn(
-              cudfVec->getTableView(), veloxPool_.get(), std::string(""), cudfVec->stream());
-          auto strippedRv = getStrippedRowVector(*cpuRv);
-          RETURN_NOT_OK(initFromRowVector(*strippedRv));
-          LOG(WARNING) << "GPU partition: schema initialized, "
-                    << strippedRv->childrenSize() << " data columns, "
-                    << "hasComplexType=" << hasComplexType_;
-          if (hasComplexType_) {
-            auto cpuBatch = std::make_shared<VeloxColumnarBatch>(cpuRv);
-            return VeloxHashShuffleWriter::write(cpuBatch, memLimit);
-          }
+          LOG(WARNING)
+              << "GPU partition: first CudfVector batch,"
+              << " rows=" << cudfVec->size()
+              << " cols="
+              << cudfVec->getTableView().num_columns();
+          auto& fullRowType = cudfVec->type()->asRow();
+          auto typeChildren = fullRowType.children();
+          typeChildren.erase(typeChildren.begin());
+          auto strippedType =
+              ROW(std::move(typeChildren));
+          auto emptyRv = RowVector::createEmpty(
+              strippedType, veloxPool_.get());
+          RETURN_NOT_OK(initFromRowVector(*emptyRv));
         }
 
-        // Complex types not yet supported in GPU path.
         if (hasComplexType_) {
-          auto cpuRv = cudf_velox::with_arrow::toVeloxColumn(
-              cudfVec->getTableView(), veloxPool_.get(), std::string(""), cudfVec->stream());
-          auto cpuBatch = std::make_shared<VeloxColumnarBatch>(cpuRv);
-          return VeloxHashShuffleWriter::write(cpuBatch, memLimit);
+          auto cpuRv =
+              cudf_velox::with_arrow::toVeloxColumn(
+                  cudfVec->getTableView(),
+                  veloxPool_.get(),
+                  std::string(""),
+                  cudfVec->stream());
+          auto cpuBatch =
+              std::make_shared<VeloxColumnarBatch>(cpuRv);
+          return VeloxHashShuffleWriter::write(
+              cpuBatch, memLimit);
         }
 
         writtenBytes_ = 0;

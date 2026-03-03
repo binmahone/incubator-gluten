@@ -28,6 +28,7 @@
 #include "velox/experimental/cudf/CudfConfig.h"
 #include "velox/experimental/cudf/connectors/hive/CudfHiveConnectorSplit.h"
 #include "velox/experimental/cudf/exec/ToCudf.h"
+#include "velox/experimental/cudf/vector/CudfVector.h"
 #endif
 #include "operators/plannodes/RowVectorStream.h"
 
@@ -345,6 +346,14 @@ std::shared_ptr<ColumnarBatch> WholeStageResultIterator::next() {
   if (numRows == 0) {
     return nullptr;
   }
+
+#ifdef GLUTEN_ENABLE_GPU
+  if (auto cudfVec =
+          std::dynamic_pointer_cast<velox::cudf_velox::CudfVector>(vector)) {
+    auto numCols = cudfVec->getTableView().num_columns();
+    return std::make_shared<VeloxColumnarBatch>(vector, numCols);
+  }
+#endif
 
   {
     ScopedTimer timer(&loadLazyVectorTime_);
@@ -779,14 +788,12 @@ std::unordered_map<std::string, std::string> WholeStageResultIterator::getQueryC
         std::to_string(veloxCfg_->get<int32_t>(kExprMaxCompiledRegexes, 100));
 
 #ifdef GLUTEN_ENABLE_GPU
-    configs[velox::cudf_velox::CudfConfig::kCudfEnabled] = std::to_string(veloxCfg_->get<bool>(kCudfEnabled, false));
-    {
-      auto gpuShuffleOutput = veloxCfg_->get<bool>(kCudfGpuShuffleOutput, false);
-      LOG(WARNING) << "WholeStageResultIterator: gpuShuffleOutput=" << gpuShuffleOutput;
-      if (gpuShuffleOutput) {
-        configs["cudf.gpu_shuffle_output"] = "true";
-      }
-    }
+    configs[velox::cudf_velox::CudfConfig::kCudfEnabled] =
+        std::to_string(veloxCfg_->get<bool>(kCudfEnabled, false));
+    configs[velox::cudf_velox::CudfConfig::kCudfSkipOutputToVelox] =
+        std::to_string(veloxCfg_->get<bool>(
+            kCudfSkipOutputToVelox,
+            kCudfSkipOutputToVeloxDefault));
 #endif
 
     const auto setIfExists = [&](const std::string& glutenKey, const std::string& veloxKey) {

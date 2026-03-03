@@ -33,6 +33,7 @@ case class CudfNodeValidationRule(glutenConf: GlutenConfig) extends Rule[SparkPl
     if (!glutenConf.enableColumnarCudf) {
       return plan
     }
+    val gpuPartition = glutenConf.enableCudfGpuPartition
     val transformedPlan = plan.transformUp {
       case shuffle @ ColumnarShuffleExchangeExec(
             _,
@@ -41,9 +42,17 @@ case class CudfNodeValidationRule(glutenConf: GlutenConfig) extends Rule[SparkPl
             _,
             _) =>
         setTagForWholeStageTransformer(w)
-        createGPUColumnarExchange(shuffle)
+        if (gpuPartition) {
+          w.setTagValue(CudfTag.GpuShuffleStageTag, true)
+          createGPUColumnarExchange(shuffle, Some(w))
+        } else {
+          createGPUColumnarExchange(shuffle)
+        }
       case shuffle @ ColumnarShuffleExchangeExec(_, w: WholeStageTransformer, _, _, _) =>
         setTagForWholeStageTransformer(w)
+        if (gpuPartition) {
+          w.setTagValue(CudfTag.GpuShuffleStageTag, true)
+        }
         createGPUColumnarExchange(shuffle)
       case transformer: WholeStageTransformer =>
         setTagForWholeStageTransformer(transformer)
@@ -79,10 +88,14 @@ object CudfNodeValidationRule {
     }
   }
 
-  def createGPUColumnarExchange(shuffle: ColumnarShuffleExchangeExec): SparkPlan = {
+  def createGPUColumnarExchange(
+      shuffle: ColumnarShuffleExchangeExec,
+      childOverride: Option[SparkPlan] = None
+  ): SparkPlan = {
+    val child = childOverride.getOrElse(shuffle.child)
     val exec = GPUColumnarShuffleExchangeExec(
       shuffle.outputPartitioning,
-      shuffle.child,
+      child,
       shuffle.shuffleOrigin,
       shuffle.projectOutputAttributes,
       shuffle.advisoryPartitionSize)

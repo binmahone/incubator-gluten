@@ -189,7 +189,9 @@ class VeloxIteratorApi extends IteratorApi with Logging {
       updateNativeMetrics: IMetrics => Unit,
       partitionIndex: Int,
       inputIterators: Seq[Iterator[ColumnarBatch]] = Seq(),
-      enableCudf: Boolean = false): Iterator[ColumnarBatch] = {
+      enableCudf: Boolean = false,
+      skipOutputToVelox: Boolean = false
+  ): Iterator[ColumnarBatch] = {
     assert(
       inputPartition.isInstanceOf[GlutenPartition],
       "Velox backend only accept GlutenPartition.")
@@ -202,16 +204,14 @@ class VeloxIteratorApi extends IteratorApi with Logging {
       iter => new ColumnarBatchInIterator(BackendsApiManager.getBackendName, iter.asJava)
     }
 
-    val gpuShuffleFlag = GlutenConfig.gpuShuffleOutputFlag.get()
-    GlutenConfig.gpuShuffleOutputFlag.set(false)
-    val extraConfMap =
-      scala.collection.mutable.Map(GlutenConfig.COLUMNAR_CUDF_ENABLED.key -> enableCudf.toString)
-    if (gpuShuffleFlag) {
-      extraConfMap += (GlutenConfig.COLUMNAR_CUDF_GPU_SHUFFLE_OUTPUT.key -> "true")
-    }
-    logWarning(s"genFirstStageIterator: gpuShuffleFlag=$gpuShuffleFlag extraConf=$extraConfMap")
+    val extraConf = Map(
+      GlutenConfig.COLUMNAR_CUDF_ENABLED.key ->
+        enableCudf.toString,
+      "spark.gluten.sql.columnar.cudf.skipOutputToVelox" ->
+        skipOutputToVelox.toString
+    ).asJava
     val transKernel =
-      NativePlanEvaluator.create(BackendsApiManager.getBackendName, extraConfMap.asJava)
+      NativePlanEvaluator.create(BackendsApiManager.getBackendName, extraConf)
 
     val splitInfoByteArray = inputPartition
       .asInstanceOf[GlutenPartition]
@@ -264,20 +264,21 @@ class VeloxIteratorApi extends IteratorApi with Logging {
       updateNativeMetrics: IMetrics => Unit,
       partitionIndex: Int,
       materializeInput: Boolean,
-      enableCudf: Boolean = false): Iterator[ColumnarBatch] = {
+      enableCudf: Boolean = false,
+      skipOutputToVelox: Boolean = false
+  ): Iterator[ColumnarBatch] = {
     if (enableCudf) {
       trySetCurrentTask(context)
     }
 
-    val gpuShuffleFlagFinal = GlutenConfig.gpuShuffleOutputFlag.get()
-    GlutenConfig.gpuShuffleOutputFlag.set(false)
-    val extraConfMap =
-      scala.collection.mutable.Map(GlutenConfig.COLUMNAR_CUDF_ENABLED.key -> enableCudf.toString)
-    if (gpuShuffleFlagFinal) {
-      extraConfMap += (GlutenConfig.COLUMNAR_CUDF_GPU_SHUFFLE_OUTPUT.key -> "true")
-    }
+    val extraConf = Map(
+      GlutenConfig.COLUMNAR_CUDF_ENABLED.key ->
+        enableCudf.toString,
+      "spark.gluten.sql.columnar.cudf.skipOutputToVelox" ->
+        skipOutputToVelox.toString
+    ).asJava
     val transKernel =
-      NativePlanEvaluator.create(BackendsApiManager.getBackendName, extraConfMap.asJava)
+      NativePlanEvaluator.create(BackendsApiManager.getBackendName, extraConf)
     val columnarNativeIterator =
       inputIterators.map {
         iter => new ColumnarBatchInIterator(BackendsApiManager.getBackendName, iter.asJava)

@@ -51,7 +51,8 @@ case class TransformContext(outputAttributes: Seq[Attribute], root: RelNode)
 case class WholeStageTransformContext(
     root: PlanNode,
     substraitContext: SubstraitContext = null,
-    enableCudf: Boolean = false)
+    enableCudf: Boolean = false,
+    skipOutputToVelox: Boolean = false)
 
 /** Base interface for a query plan that can be interpreted to Substrait representation. */
 trait TransformSupport extends ValidatablePlan {
@@ -257,7 +258,8 @@ case class WholeStageTransformer(child: SparkPlan, materializeInput: Boolean = f
       PlanBuilder.makePlan(substraitContext, Lists.newArrayList(childCtx.root), outNames)
     }
 
-    WholeStageTransformContext(planNode, substraitContext, isCudf)
+    val skipOutput = getTagValue[Boolean](CudfTag.GpuShuffleStageTag).getOrElse(false)
+    WholeStageTransformContext(planNode, substraitContext, isCudf, skipOutput)
   }
 
   def doWholeStageTransform(): WholeStageTransformContext = {
@@ -351,7 +353,8 @@ case class WholeStageTransformer(child: SparkPlan, materializeInput: Boolean = f
         wsCtx.substraitContext.registeredJoinParams,
         wsCtx.substraitContext.registeredAggregationParams
       ),
-      wsCtx.enableCudf
+      wsCtx.enableCudf,
+      wsCtx.skipOutputToVelox
     )
 
     val allInputPartitions = leafTransformers.map(_.getPartitions)
@@ -487,4 +490,6 @@ class ColumnarInputRDDsWrapper(columnarInputRDDs: Seq[RDD[ColumnarBatch]]) exten
 
 object CudfTag {
   val CudfTag = TreeNodeTag[Boolean]("org.apache.gluten.CudfTag")
+  val GpuShuffleStageTag =
+    TreeNodeTag[Boolean]("org.apache.gluten.GpuShuffleStageTag")
 }

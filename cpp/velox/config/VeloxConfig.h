@@ -223,11 +223,11 @@ const std::string kCudfHostAsPinnedThresholdDefault = "0";
 const std::string kCudfPackedDtoH = "spark.gluten.sql.columnar.backend.velox.cudf.packedDtoH";
 const std::string kCudfPackedDtoHDefault = "true";
 
-// Per-task boolean set by ColumnarShuffleWriter when gpuPartition is enabled.
-// Tells the pipeline to skip CudfToVelox for the last operator so CudfVector
+// When true, the last GPU operator skips inserting CudfToVelox so CudfVector
 // flows directly to VeloxGpuHashShuffleWriter::gpuPartitionAndEvict.
-// Only true for shuffle output tasks; broadcast/result tasks remain false.
-const std::string kCudfGpuShuffleOutput = "spark.gluten.sql.columnar.cudf.gpuShuffleOutput";
+// Set at plan build time for WholeStageTransformers that feed GPU shuffle.
+const std::string kCudfSkipOutputToVelox = "spark.gluten.sql.columnar.cudf.skipOutputToVelox";
+const bool kCudfSkipOutputToVeloxDefault = false;
 
 const std::string kStaticBackendConfPrefix = "spark.gluten.velox.";
 const std::string kDynamicBackendConfPrefix = "spark.gluten.sql.columnar.backend.velox.";

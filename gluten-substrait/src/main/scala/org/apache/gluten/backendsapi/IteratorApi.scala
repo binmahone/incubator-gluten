@@ -60,6 +60,7 @@ trait IteratorApi {
    * Generate Iterator[ColumnarBatch] for first stage. ("first" means it does not depend on other
    * SCAN inputs)
    */
+  // scalastyle:off argcount
   def genFirstStageIterator(
       inputPartition: BaseGlutenPartition,
       context: TaskContext,
@@ -68,14 +69,10 @@ trait IteratorApi {
       updateNativeMetrics: IMetrics => Unit,
       partitionIndex: Int,
       inputIterators: Seq[Iterator[ColumnarBatch]] = Seq(),
-      enableCudf: Boolean = false
+      enableCudf: Boolean = false,
+      skipOutputToVelox: Boolean = false
   ): Iterator[ColumnarBatch]
 
-  /**
-   * Generate Iterator[ColumnarBatch] for final stage. ("Final" means it depends on other SCAN
-   * inputs, maybe it was a mistake to use the word "final")
-   */
-  // scalastyle:off argcount
   def genFinalStageIterator(
       context: TaskContext,
       inputIterators: Seq[Iterator[ColumnarBatch]],
@@ -85,6 +82,8 @@ trait IteratorApi {
       updateNativeMetrics: IMetrics => Unit,
       partitionIndex: Int,
       materializeInput: Boolean = false,
-      enableCudf: Boolean = false): Iterator[ColumnarBatch]
+      enableCudf: Boolean = false,
+      skipOutputToVelox: Boolean = false
+  ): Iterator[ColumnarBatch]
   // scalastyle:on argcount
 }

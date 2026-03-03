@@ -58,7 +58,8 @@ class GlutenWholeStageColumnarRDD(
     pipelineTime: SQLMetric,
     updateInputMetrics: InputMetricsWrapper => Unit,
     updateNativeMetrics: IMetrics => Unit,
-    enableCudf: Boolean = false)
+    enableCudf: Boolean = false,
+    skipOutputToVelox: Boolean = false)
   extends RDD[ColumnarBatch](sc, rdds.getDependencies) {
 
   override def compute(split: Partition, context: TaskContext): Iterator[ColumnarBatch] = {
@@ -74,7 +75,8 @@ class GlutenWholeStageColumnarRDD(
           updateNativeMetrics,
           split.index,
           inputIterators,
-          enableCudf
+          enableCudf,
+          skipOutputToVelox
         )
     }
   }

@@ -283,7 +283,8 @@ class CHIteratorApi extends IteratorApi with Logging with LogLevelUtil {
       updateNativeMetrics: IMetrics => Unit,
       partitionIndex: Int,
       inputIterators: Seq[Iterator[ColumnarBatch]] = Seq(),
-      enableCudf: Boolean = false
+      enableCudf: Boolean = false,
+      skipOutputToVelox: Boolean = false
   ): Iterator[ColumnarBatch] = {
 
     require(
@@ -325,7 +326,9 @@ class CHIteratorApi extends IteratorApi with Logging with LogLevelUtil {
       updateNativeMetrics: IMetrics => Unit,
       partitionIndex: Int,
       materializeInput: Boolean,
-      enableCudf: Boolean): Iterator[ColumnarBatch] = {
+      enableCudf: Boolean,
+      skipOutputToVelox: Boolean = false
+  ): Iterator[ColumnarBatch] = {
     // scalastyle:on argcount
 
     // Final iterator does not contain scan split, so pass empty split info to native here.
