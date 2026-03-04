@@ -145,6 +145,14 @@ arrow::Result<std::shared_ptr<arrow::Buffer>> MmapFileStream::Read(int64_t nbyte
     return std::make_shared<arrow::Buffer>(nullptr, 0);
   }
 }
+
+arrow::Status MmapFileStream::Advance(int64_t nbytes) {
+  ARROW_ASSIGN_OR_RAISE(nbytes, actualReadSize(nbytes));
+  if (nbytes > 0) {
+    advance(nbytes);
+  }
+  return arrow::Status::OK();
+}
 } // namespace gluten
 
 std::string gluten::getShuffleSpillDir(const std::string& configuredDir, int32_t subDirId) {

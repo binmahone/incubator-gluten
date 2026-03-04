@@ -22,6 +22,7 @@ import org.apache.gluten.exception.GlutenNotSupportException
 import org.apache.gluten.execution._
 import org.apache.gluten.extension.CudfNodeValidationRule.{createGPUColumnarExchange, setTagForWholeStageTransformer}
 
+import org.apache.spark.sql.catalyst.plans.physical.HashPartitioning
 import org.apache.spark.sql.catalyst.rules.Rule
 import org.apache.spark.sql.execution.{ColumnarShuffleExchangeExec, GPUColumnarShuffleExchangeExec, SparkPlan}
 import org.apache.spark.sql.internal.SQLConf
@@ -42,18 +43,26 @@ case class CudfNodeValidationRule(glutenConf: GlutenConfig) extends Rule[SparkPl
             _,
             _) =>
         setTagForWholeStageTransformer(w)
-        if (gpuPartition) {
+        val isHash = shuffle.outputPartitioning.isInstanceOf[HashPartitioning]
+        if (gpuPartition && isHash) {
           w.setTagValue(CudfTag.GpuShuffleStageTag, true)
           createGPUColumnarExchange(shuffle, Some(w))
-        } else {
+        } else if (isHash) {
           createGPUColumnarExchange(shuffle)
+        } else {
+          shuffle
         }
       case shuffle @ ColumnarShuffleExchangeExec(_, w: WholeStageTransformer, _, _, _) =>
         setTagForWholeStageTransformer(w)
-        if (gpuPartition) {
+        val isHash = shuffle.outputPartitioning.isInstanceOf[HashPartitioning]
+        if (gpuPartition && isHash) {
           w.setTagValue(CudfTag.GpuShuffleStageTag, true)
         }
-        createGPUColumnarExchange(shuffle)
+        if (isHash) {
+          createGPUColumnarExchange(shuffle)
+        } else {
+          shuffle
+        }
       case transformer: WholeStageTransformer =>
         setTagForWholeStageTransformer(transformer)
         transformer

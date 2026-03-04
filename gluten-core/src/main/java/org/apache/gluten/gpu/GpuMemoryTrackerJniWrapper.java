@@ -50,6 +50,6 @@ public final class GpuMemoryTrackerJniWrapper {
   /** Set the max number of concurrent GPU operations in C++ GpuLock (counting semaphore). */
   public static native void setMaxConcurrentGpuTasks(int maxTasks);
 
-  /** Query total device memory in bytes via cudaMemGetInfo + cudaGetDeviceProperties. Returns 0 on failure. */
+  /** Query total device memory in bytes via cudaMemGetInfo. Returns 0 on failure. */
   public static native long getDeviceMemorySize();
 }

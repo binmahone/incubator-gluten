@@ -89,6 +89,10 @@ class MmapFileStream : public arrow::io::InputStream {
 
   arrow::Result<std::shared_ptr<arrow::Buffer>> Read(int64_t nbytes) override;
 
+  // Advance position without reading or prefetching pages.
+  // Useful for skipping buffers during column projection.
+  arrow::Status Advance(int64_t nbytes);
+
   bool closed() const override;
 
  private:

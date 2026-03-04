@@ -93,6 +93,28 @@ class BlockPayload final : public Payload {
       int64_t& deserializeTime,
       int64_t& decompressTime);
 
+  // Two-phase deserialization with column projection:
+  // Phase 1: readHeader() reads type, numRows, numBuffers (small IO).
+  // Phase 2: readSelectedBuffers() reads only projected buffers, skipping the rest.
+  struct BlockHeader {
+    uint8_t type;
+    uint32_t numRows;
+    uint32_t numBuffers;
+  };
+
+  static arrow::Result<BlockHeader> readHeader(
+      arrow::io::InputStream* inputStream,
+      int64_t& deserializeTime);
+
+  static arrow::Result<std::vector<std::shared_ptr<arrow::Buffer>>> readSelectedBuffers(
+      arrow::io::InputStream* inputStream,
+      const BlockHeader& header,
+      const std::shared_ptr<arrow::util::Codec>& codec,
+      arrow::MemoryPool* pool,
+      const std::vector<bool>& bufferProjection,
+      int64_t& deserializeTime,
+      int64_t& decompressTime);
+
   static int64_t maxCompressedLength(
       const std::vector<std::shared_ptr<arrow::Buffer>>& buffers,
       arrow::util::Codec* codec);

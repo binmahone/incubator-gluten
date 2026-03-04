@@ -37,7 +37,8 @@ class VeloxHashShuffleReaderDeserializer final : public ColumnarBatchIterator {
       int64_t readerBufferSize,
       VeloxMemoryManager* memoryManager,
       int64_t& deserializeTime,
-      int64_t& decompressTime);
+      int64_t& decompressTime,
+      const std::vector<uint32_t>& columnProjection = {});
 
   std::shared_ptr<ColumnarBatch> next() override;
 
@@ -45,6 +46,8 @@ class VeloxHashShuffleReaderDeserializer final : public ColumnarBatchIterator {
   bool resolveNextBlockType();
 
   void loadNextStream();
+
+  void initBufferProjection();
 
   std::shared_ptr<StreamReader> streamReader_;
   std::shared_ptr<arrow::Schema> schema_;
@@ -62,6 +65,12 @@ class VeloxHashShuffleReaderDeserializer final : public ColumnarBatchIterator {
 
   std::vector<int32_t> dictionaryFields_{};
   std::vector<facebook::velox::VectorPtr> dictionaries_{};
+
+  // Column projection: indices of columns to read. Empty means read all.
+  std::vector<uint32_t> columnProjection_;
+  // Buffer-level projection derived from columnProjection_ and schema.
+  std::vector<bool> bufferProjection_;
+  bool hasProjection_{false};
 };
 
 class VeloxSortShuffleReaderDeserializer final : public ColumnarBatchIterator {
@@ -161,7 +170,8 @@ class VeloxShuffleReaderDeserializerFactory {
       int64_t readerBufferSize,
       int64_t deserializerBufferSize,
       VeloxMemoryManager* memoryManager,
-      ShuffleWriterType shuffleWriterType);
+      ShuffleWriterType shuffleWriterType,
+      const std::vector<uint32_t>& columnProjection = {});
 
   std::unique_ptr<ColumnarBatchIterator> createDeserializer(const std::shared_ptr<StreamReader>& streamReader);
 
@@ -185,6 +195,7 @@ class VeloxShuffleReaderDeserializerFactory {
   bool hasComplexType_{false};
 
   ShuffleWriterType shuffleWriterType_;
+  std::vector<uint32_t> columnProjection_;
 
   int64_t deserializeTime_{0};
   int64_t decompressTime_{0};

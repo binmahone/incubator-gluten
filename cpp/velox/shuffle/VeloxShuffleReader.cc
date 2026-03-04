@@ -36,6 +36,7 @@
 #include "velox/vector/arrow/Bridge.h"
 
 #include <algorithm>
+#include <unordered_set>
 
 #ifdef GLUTEN_ENABLE_GPU
 #include "VeloxGpuShuffleReader.h"
@@ -238,19 +239,95 @@ RowTypePtr getComplexWriteType(const std::vector<TypePtr>& types) {
   return std::make_shared<const RowType>(std::move(complexTypeColNames), std::move(complexTypeChildrens));
 }
 
+// Compute which buffer indices belong to each column based on schema types.
+// Returns number of flat buffers (excluding the complex type buffer at end).
+int32_t countFlatBuffersPerColumn(const std::vector<TypePtr>& types, std::vector<int32_t>& bufferStartPerColumn) {
+  int32_t bufferIdx = 0;
+  for (size_t i = 0; i < types.size(); ++i) {
+    bufferStartPerColumn.push_back(bufferIdx);
+    auto kind = types[i]->kind();
+    switch (kind) {
+      case TypeKind::ROW:
+      case TypeKind::MAP:
+      case TypeKind::ARRAY:
+        break;
+      case TypeKind::UNKNOWN:
+        break;
+      case TypeKind::VARCHAR:
+      case TypeKind::VARBINARY:
+        bufferIdx += 3;
+        break;
+      default:
+        bufferIdx += 2;
+        break;
+    }
+  }
+  return bufferIdx;
+}
+
+std::vector<bool> computeBufferProjection(
+    const std::vector<TypePtr>& types,
+    const std::vector<uint32_t>& columnProjection,
+    bool hasComplexType) {
+  std::unordered_set<uint32_t> projectedCols(columnProjection.begin(), columnProjection.end());
+
+  std::vector<bool> bufferProjection;
+  bool anyComplexNeeded = false;
+
+  for (size_t i = 0; i < types.size(); ++i) {
+    bool needed = projectedCols.count(i) > 0;
+    auto kind = types[i]->kind();
+    switch (kind) {
+      case TypeKind::ROW:
+      case TypeKind::MAP:
+      case TypeKind::ARRAY:
+        if (needed) {
+          anyComplexNeeded = true;
+        }
+        break;
+      case TypeKind::UNKNOWN:
+        break;
+      case TypeKind::VARCHAR:
+      case TypeKind::VARBINARY:
+        bufferProjection.push_back(needed);
+        bufferProjection.push_back(needed);
+        bufferProjection.push_back(needed);
+        break;
+      default:
+        bufferProjection.push_back(needed);
+        bufferProjection.push_back(needed);
+        break;
+    }
+  }
+
+  if (hasComplexType) {
+    bufferProjection.push_back(anyComplexNeeded);
+  }
+
+  return bufferProjection;
+}
+
 RowVectorPtr deserialize(
     RowTypePtr type,
     uint32_t numRows,
     std::vector<BufferPtr>& buffers,
     const std::vector<int32_t>& dictionaryFields,
     const std::vector<VectorPtr>& dictionaries,
-    memory::MemoryPool* pool) {
+    memory::MemoryPool* pool,
+    const std::vector<uint32_t>* columnProjection = nullptr) {
   std::vector<VectorPtr> children;
   auto types = type->as<TypeKind::ROW>().children();
 
+  std::unordered_set<uint32_t> projectedCols;
+  bool hasProjection = columnProjection != nullptr && !columnProjection->empty();
+  if (hasProjection) {
+    projectedCols.insert(columnProjection->begin(), columnProjection->end());
+  }
+
   std::vector<VectorPtr> complexChildren;
   auto complexRowType = getComplexWriteType(types);
-  if (complexRowType->children().size() > 0) {
+  bool hasComplexBuffers = complexRowType->children().size() > 0;
+  if (hasComplexBuffers && !buffers.empty() && buffers[buffers.size() - 1] != nullptr) {
     complexChildren = readComplexType(buffers[buffers.size() - 1], complexRowType, pool)->children();
   }
 
@@ -259,17 +336,40 @@ RowVectorPtr deserialize(
   int32_t dictionaryIdx = 0;
   for (size_t i = 0; i < types.size(); ++i) {
     const auto kind = types[i]->kind();
+    bool needed = !hasProjection || projectedCols.count(i) > 0;
+
     switch (kind) {
       case TypeKind::ROW:
       case TypeKind::MAP:
       case TypeKind::ARRAY: {
-        children.emplace_back(std::move(complexChildren[complexIdx]));
+        if (needed && complexIdx < complexChildren.size()) {
+          children.emplace_back(std::move(complexChildren[complexIdx]));
+        } else {
+          children.emplace_back(BaseVector::createNullConstant(types[i], numRows, pool));
+        }
         complexIdx++;
       } break;
       default: {
+        if (!needed) {
+          // Skip buffers for this column
+          if (kind == TypeKind::UNKNOWN) {
+            // no buffers
+          } else if (kind == TypeKind::VARCHAR || kind == TypeKind::VARBINARY) {
+            bufferIdx += 3;
+          } else {
+            bufferIdx += 2;
+          }
+
+          if (!dictionaryFields.empty() && dictionaryIdx < dictionaryFields.size() &&
+              dictionaryFields[dictionaryIdx] == static_cast<int32_t>(i)) {
+            dictionaryIdx++;
+          }
+          children.emplace_back(BaseVector::createNullConstant(types[i], numRows, pool));
+          break;
+        }
         VectorPtr dictionary{nullptr};
         if (!dictionaryFields.empty() && dictionaryIdx < dictionaryFields.size() &&
-            dictionaryFields[dictionaryIdx] == i) {
+            dictionaryFields[dictionaryIdx] == static_cast<int32_t>(i)) {
           dictionary = dictionaries[dictionaryIdx++];
         }
         auto res = VELOX_DYNAMIC_SCALAR_TYPE_DISPATCH_ALL(
@@ -289,14 +389,15 @@ std::shared_ptr<VeloxColumnarBatch> makeColumnarBatch(
     const std::vector<int32_t>& dictionaryFields,
     const std::vector<VectorPtr>& dictionaries,
     memory::MemoryPool* pool,
-    int64_t& deserializeTime) {
+    int64_t& deserializeTime,
+    const std::vector<uint32_t>* columnProjection = nullptr) {
   ScopedTimer timer(&deserializeTime);
   std::vector<BufferPtr> veloxBuffers;
   veloxBuffers.reserve(arrowBuffers.size());
   for (auto& buffer : arrowBuffers) {
     veloxBuffers.push_back(convertToVeloxBuffer(std::move(buffer)));
   }
-  auto rowVector = deserialize(type, numRows, veloxBuffers, dictionaryFields, dictionaries, pool);
+  auto rowVector = deserialize(type, numRows, veloxBuffers, dictionaryFields, dictionaries, pool, columnProjection);
   return std::make_shared<VeloxColumnarBatch>(std::move(rowVector));
 }
 
@@ -447,7 +548,8 @@ VeloxHashShuffleReaderDeserializer::VeloxHashShuffleReaderDeserializer(
     int64_t readerBufferSize,
     VeloxMemoryManager* memoryManager,
     int64_t& deserializeTime,
-    int64_t& decompressTime)
+    int64_t& decompressTime,
+    const std::vector<uint32_t>& columnProjection)
     : streamReader_(streamReader),
       schema_(schema),
       codec_(codec),
@@ -455,7 +557,10 @@ VeloxHashShuffleReaderDeserializer::VeloxHashShuffleReaderDeserializer(
       readerBufferSize_(readerBufferSize),
       memoryManager_(memoryManager),
       deserializeTime_(deserializeTime),
-      decompressTime_(decompressTime) {}
+      decompressTime_(decompressTime),
+      columnProjection_(columnProjection) {
+  initBufferProjection();
+}
 
 bool VeloxHashShuffleReaderDeserializer::resolveNextBlockType() {
   GLUTEN_ASSIGN_OR_THROW(auto blockType, readBlockType(in_.get()));
@@ -509,6 +614,20 @@ void VeloxHashShuffleReaderDeserializer::loadNextStream() {
   }
 }
 
+void VeloxHashShuffleReaderDeserializer::initBufferProjection() {
+  if (columnProjection_.empty()) {
+    hasProjection_ = false;
+    return;
+  }
+
+  auto types = rowType_->as<TypeKind::ROW>().children();
+  auto complexRowType = getComplexWriteType(types);
+  bool hasComplexType = complexRowType->children().size() > 0;
+
+  bufferProjection_ = computeBufferProjection(types, columnProjection_, hasComplexType);
+  hasProjection_ = true;
+}
+
 std::shared_ptr<ColumnarBatch> VeloxHashShuffleReaderDeserializer::next() {
   if (in_ == nullptr) {
     loadNextStream();
@@ -527,6 +646,33 @@ std::shared_ptr<ColumnarBatch> VeloxHashShuffleReaderDeserializer::next() {
   }
 
   uint32_t numRows = 0;
+
+  if (hasProjection_) {
+    // Two-phase read: header first, then only projected buffers.
+    GLUTEN_ASSIGN_OR_THROW(auto header, BlockPayload::readHeader(in_.get(), deserializeTime_));
+    numRows = header.numRows;
+    GLUTEN_ASSIGN_OR_THROW(
+        auto arrowBuffers,
+        BlockPayload::readSelectedBuffers(
+            in_.get(),
+            header,
+            codec_,
+            memoryManager_->defaultArrowMemoryPool(),
+            bufferProjection_,
+            deserializeTime_,
+            decompressTime_));
+    return makeColumnarBatch(
+        rowType_,
+        numRows,
+        std::move(arrowBuffers),
+        dictionaryFields_,
+        dictionaries_,
+        memoryManager_->getLeafMemoryPool().get(),
+        deserializeTime_,
+        &columnProjection_);
+  }
+
+  // No projection - read all buffers as before.
   GLUTEN_ASSIGN_OR_THROW(
       auto arrowBuffers,
       BlockPayload::deserialize(
@@ -797,7 +943,8 @@ VeloxShuffleReaderDeserializerFactory::VeloxShuffleReaderDeserializerFactory(
     int64_t readerBufferSize,
     int64_t deserializerBufferSize,
     VeloxMemoryManager* memoryManager,
-    ShuffleWriterType shuffleWriterType)
+    ShuffleWriterType shuffleWriterType,
+    const std::vector<uint32_t>& columnProjection)
     : schema_(schema),
       codec_(codec),
       veloxCompressionType_(veloxCompressionType),
@@ -806,7 +953,8 @@ VeloxShuffleReaderDeserializerFactory::VeloxShuffleReaderDeserializerFactory(
       readerBufferSize_(readerBufferSize),
       deserializerBufferSize_(deserializerBufferSize),
       memoryManager_(memoryManager),
-      shuffleWriterType_(shuffleWriterType) {
+      shuffleWriterType_(shuffleWriterType),
+      columnProjection_(columnProjection) {
   initFromSchema();
 }
 
@@ -835,7 +983,8 @@ std::unique_ptr<ColumnarBatchIterator> VeloxShuffleReaderDeserializerFactory::cr
           readerBufferSize_,
           memoryManager_,
           deserializeTime_,
-          decompressTime_);
+          decompressTime_,
+          columnProjection_);
     case ShuffleWriterType::kSortShuffle:
       return std::make_unique<VeloxSortShuffleReaderDeserializer>(
           streamReader,

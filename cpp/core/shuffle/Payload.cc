@@ -161,6 +161,41 @@ arrow::Result<std::shared_ptr<arrow::Buffer>> readCompressedBuffer(
   return output;
 }
 
+// Skip an uncompressed buffer: read size header, advance past data.
+arrow::Status skipUncompressedBuffer(arrow::io::InputStream* inputStream, int64_t& skipTime) {
+  ScopedTimer timer(&skipTime);
+  int64_t bufferLength;
+  RETURN_NOT_OK(inputStream->Read(sizeof(int64_t), &bufferLength));
+  if (bufferLength == kNullBuffer || bufferLength == kZeroLengthBuffer) {
+    return arrow::Status::OK();
+  }
+  if (auto* mmapStream = dynamic_cast<MmapFileStream*>(inputStream)) {
+    RETURN_NOT_OK(mmapStream->Advance(bufferLength));
+  } else {
+    ARROW_ASSIGN_OR_RAISE(auto unused, inputStream->Read(bufferLength));
+  }
+  return arrow::Status::OK();
+}
+
+// Skip a compressed buffer: read size headers, advance past compressed data.
+arrow::Status skipCompressedBuffer(arrow::io::InputStream* inputStream, int64_t& skipTime) {
+  ScopedTimer timer(&skipTime);
+  int64_t compressedLength;
+  RETURN_NOT_OK(inputStream->Read(sizeof(int64_t), &compressedLength));
+  if (compressedLength == kNullBuffer || compressedLength == kZeroLengthBuffer) {
+    return arrow::Status::OK();
+  }
+  int64_t uncompressedLength;
+  RETURN_NOT_OK(inputStream->Read(sizeof(int64_t), &uncompressedLength));
+  int64_t bytesToSkip = (compressedLength == kUncompressedBuffer) ? uncompressedLength : compressedLength;
+  if (auto* mmapStream = dynamic_cast<MmapFileStream*>(inputStream)) {
+    RETURN_NOT_OK(mmapStream->Advance(bytesToSkip));
+  } else {
+    ARROW_ASSIGN_OR_RAISE(auto unused, inputStream->Read(bytesToSkip));
+  }
+  return arrow::Status::OK();
+}
+
 } // namespace
 
 Payload::Payload(Payload::Type type, uint32_t numRows, const std::vector<bool>* isValidityBuffer)
@@ -448,6 +483,53 @@ arrow::Result<std::vector<std::shared_ptr<arrow::Buffer>>> BlockPayload::deseria
           buffers.back(), readCompressedBuffer(inputStream, codec, pool, deserializeTime, decompressTime));
     } else {
       ARROW_ASSIGN_OR_RAISE(buffers.back(), readUncompressedBuffer(inputStream, pool, deserializeTime));
+    }
+  }
+  return buffers;
+}
+
+arrow::Result<BlockPayload::BlockHeader> BlockPayload::readHeader(
+    arrow::io::InputStream* inputStream,
+    int64_t& deserializeTime) {
+  ScopedTimer timer(&deserializeTime);
+  BlockHeader header{};
+  ARROW_ASSIGN_OR_RAISE(header.type, readPayloadType(inputStream));
+  RETURN_NOT_OK(inputStream->Read(sizeof(uint32_t), &header.numRows));
+  RETURN_NOT_OK(inputStream->Read(sizeof(uint32_t), &header.numBuffers));
+  return header;
+}
+
+arrow::Result<std::vector<std::shared_ptr<arrow::Buffer>>> BlockPayload::readSelectedBuffers(
+    arrow::io::InputStream* inputStream,
+    const BlockHeader& header,
+    const std::shared_ptr<arrow::util::Codec>& codec,
+    arrow::MemoryPool* pool,
+    const std::vector<bool>& bufferProjection,
+    int64_t& deserializeTime,
+    int64_t& decompressTime) {
+  bool isCompressionEnabled = header.type == Type::kCompressed;
+
+  std::vector<std::shared_ptr<arrow::Buffer>> buffers;
+  buffers.reserve(header.numBuffers);
+
+  for (uint32_t i = 0; i < header.numBuffers; ++i) {
+    bool shouldRead = i < bufferProjection.size() ? bufferProjection[i] : true;
+
+    if (shouldRead) {
+      buffers.emplace_back();
+      if (isCompressionEnabled) {
+        ARROW_ASSIGN_OR_RAISE(
+            buffers.back(), readCompressedBuffer(inputStream, codec, pool, deserializeTime, decompressTime));
+      } else {
+        ARROW_ASSIGN_OR_RAISE(buffers.back(), readUncompressedBuffer(inputStream, pool, deserializeTime));
+      }
+    } else {
+      buffers.emplace_back(nullptr);
+      if (isCompressionEnabled) {
+        RETURN_NOT_OK(skipCompressedBuffer(inputStream, deserializeTime));
+      } else {
+        RETURN_NOT_OK(skipUncompressedBuffer(inputStream, deserializeTime));
+      }
     }
   }
   return buffers;
