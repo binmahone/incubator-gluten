@@ -61,7 +61,7 @@ class VeloxGpuHashShuffleWriter : public VeloxHashShuffleWriter {
   }
 
   arrow::Status gpuPartitionAndEvict(
-      const std::shared_ptr<facebook::velox::cudf_velox::CudfVector>& cudfVec);
+      std::shared_ptr<facebook::velox::cudf_velox::CudfVector> cudfVec);
 
   // Fast path for data pre-partitioned by CudfShufflePartition in the pipeline.
   // The RowVector's first column contains sorted PIDs; scan for boundaries and
