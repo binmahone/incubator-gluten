@@ -221,177 +221,88 @@ arrow::Result<std::unique_ptr<BlockPayload>> BlockPayload::fromBuffers(
     std::vector<std::shared_ptr<arrow::Buffer>> buffers,
     const std::vector<bool>* isValidityBuffer,
     arrow::MemoryPool* pool,
-    arrow::util::Codec* codec,
-    int32_t compressionThreads,
-    CompressionThreadPool* threadPool) {
+    arrow::util::Codec* codec) {
   const uint32_t numBuffers = buffers.size();
 
   if (payloadType == Payload::Type::kCompressed) {
     Timer compressionTime;
     compressionTime.start();
 
-    const bool useParallel = compressionThreads > 1 && numBuffers > 1 && threadPool != nullptr;
+    auto maxLength = maxCompressedLength(buffers, codec);
+    std::shared_ptr<arrow::Buffer> compressedBuffer;
 
-    if (!useParallel) {
-      auto maxLength = maxCompressedLength(buffers, codec);
-      std::shared_ptr<arrow::Buffer> compressedBuffer;
+    ARROW_ASSIGN_OR_RAISE(compressedBuffer, arrow::AllocateResizableBuffer(maxLength, pool));
+    auto* output = compressedBuffer->mutable_data();
 
-      ARROW_ASSIGN_OR_RAISE(compressedBuffer, arrow::AllocateResizableBuffer(maxLength, pool));
-      auto* output = compressedBuffer->mutable_data();
-
-      int64_t actualLength = 0;
-      for (auto& buffer : buffers) {
-        auto availableLength = maxLength - actualLength;
-        ARROW_ASSIGN_OR_RAISE(auto compressedSize, compressBuffer(std::move(buffer), output, availableLength, codec));
-        output += compressedSize;
-        actualLength += compressedSize;
-      }
-
-      ARROW_RETURN_IF(actualLength < 0, arrow::Status::Invalid("Writing compressed buffer out of bound."));
-      RETURN_NOT_OK(std::dynamic_pointer_cast<arrow::ResizableBuffer>(compressedBuffer)->Resize(actualLength));
-
-      compressionTime.stop();
-      auto payload = std::unique_ptr<BlockPayload>(
-          new BlockPayload(Type::kCompressed, numRows, numBuffers, {compressedBuffer}, isValidityBuffer));
-      payload->setCompressionTime(compressionTime.realTimeUsed());
-      return payload;
+    int64_t actualLength = 0;
+    for (auto& buffer : buffers) {
+      auto availableLength = maxLength - actualLength;
+      ARROW_ASSIGN_OR_RAISE(auto compressedSize, compressBuffer(std::move(buffer), output, availableLength, codec));
+      output += compressedSize;
+      actualLength += compressedSize;
     }
 
-    // Parallel compression: workers do ONLY raw codec->Compress() with
-    // pre-computed raw pointers. No Arrow types, no memory pool operations,
-    // no Codec::Create inside workers -- workers never touch any
-    // non-thread-safe shared state, eliminating mutex corruption risk.
-    //
-    // Uses a single contiguous output buffer to avoid per-buffer allocation
-    // overhead and final concatenation memcpy. After parallel compression,
-    // the main thread compacts the buffer in-place (always moving backward).
-
-    static const int64_t kHeaderLen = 2 * sizeof(int64_t);
-
-    struct CompressWork {
-      const uint8_t* inputData;
-      int64_t inputSize;
-      uint8_t* compressTarget;   // raw pointer where worker writes compressed data
-      int64_t compressCapacity;
-      int64_t rawCompressedLen;  // filled by worker (raw codec output, no header)
-      bool failed;
-      int64_t trivialMarker;    // kNullBuffer or kZeroLengthBuffer for trivial buffers
-      int64_t regionOffset;     // offset of this buffer's region in the output buffer
-    };
-
-    std::vector<CompressWork> work(numBuffers);
-    std::vector<uint32_t> nonTrivialIndices;
-    nonTrivialIndices.reserve(numBuffers);
-
-    // Compute layout: assign each buffer a region in a single contiguous buffer.
-    int64_t totalMaxLen = 0;
-    for (uint32_t i = 0; i < numBuffers; i++) {
-      auto& w = work[i];
-      w.failed = false;
-      w.rawCompressedLen = 0;
-      w.regionOffset = totalMaxLen;
-      if (!buffers[i]) {
-        w.inputSize = 0;
-        w.trivialMarker = kNullBuffer;
-        totalMaxLen += sizeof(int64_t);
-      } else if (buffers[i]->size() == 0) {
-        w.inputSize = 0;
-        w.trivialMarker = kZeroLengthBuffer;
-        totalMaxLen += sizeof(int64_t);
-      } else {
-        w.inputData = buffers[i]->data();
-        w.inputSize = buffers[i]->size();
-        w.compressCapacity = codec->MaxCompressedLen(w.inputSize, w.inputData);
-        totalMaxLen += kHeaderLen + w.compressCapacity;
-        nonTrivialIndices.push_back(i);
-      }
-    }
-
-    // Single allocation for the entire output.
-    ARROW_ASSIGN_OR_RAISE(auto compressedBuffer, arrow::AllocateResizableBuffer(totalMaxLen, pool));
-    auto* base = compressedBuffer->mutable_data();
-
-    // Set up raw pointers for workers (compressed data goes after the header slot).
-    for (const auto idx : nonTrivialIndices) {
-      work[idx].compressTarget = base + work[idx].regionOffset + kHeaderLen;
-    }
-
-    // Pre-create one codec per worker on the main thread.
-    const int32_t numWorkers =
-        std::min(static_cast<int32_t>(nonTrivialIndices.size()), compressionThreads);
-    std::vector<std::unique_ptr<arrow::util::Codec>> workerCodecs(numWorkers);
-    for (int32_t t = 0; t < numWorkers; t++) {
-      ARROW_ASSIGN_OR_RAISE(workerCodecs[t],
-          arrow::util::Codec::Create(codec->compression_type(), codec->compression_level()));
-    }
-
-    // Submit numWorkers tasks to the persistent pool. Each task processes
-    // its share of buffers using a pre-created codec. The pool's submitMutex
-    // serializes concurrent callers (main thread vs memory reclamation),
-    // and atomic spin-wait avoids stack-local mutex lifetime issues.
-    std::vector<std::function<void()>> tasks;
-    tasks.reserve(numWorkers);
-    for (int32_t t = 0; t < numWorkers; t++) {
-      auto* localCodec = workerCodecs[t].get();
-      tasks.emplace_back(
-          [t, numWorkers, &nonTrivialIndices, &work, localCodec]() {
-            for (size_t j = t; j < nonTrivialIndices.size();
-                 j += static_cast<size_t>(numWorkers)) {
-              auto& w = work[nonTrivialIndices[j]];
-              auto result = localCodec->Compress(
-                  w.inputSize, w.inputData, w.compressCapacity, w.compressTarget);
-              if (!result.ok()) {
-                w.failed = true;
-                return;
-              }
-              w.rawCompressedLen = *result;
-            }
-          });
-    }
-    threadPool->submitAndWait(tasks);
-
-    // Compact in-place: write final data contiguously from the start.
-    // Since compressed size <= max size, the write position is always <=
-    // the source position, so memmove is safe (always moves backward).
-    auto* dst = base;
-    for (uint32_t i = 0; i < numBuffers; i++) {
-      auto& w = work[i];
-      if (w.inputSize == 0) {
-        write<int64_t>(&dst, w.trivialMarker);
-        continue;
-      }
-      ARROW_RETURN_IF(w.failed, arrow::Status::Invalid("Parallel compression failed for buffer ", i));
-
-      auto* compSrc = base + w.regionOffset + kHeaderLen;
-      if (w.rawCompressedLen >= w.inputSize) {
-        write<int64_t>(&dst, kUncompressedBuffer);
-        write<int64_t>(&dst, static_cast<int64_t>(w.inputSize));
-        memcpy(dst, w.inputData, w.inputSize);
-        dst += w.inputSize;
-      } else {
-        write<int64_t>(&dst, static_cast<int64_t>(w.rawCompressedLen));
-        write<int64_t>(&dst, static_cast<int64_t>(w.inputSize));
-        if (dst != compSrc) {
-          memmove(dst, compSrc, w.rawCompressedLen);
-        }
-        dst += w.rawCompressedLen;
-      }
-      buffers[i].reset();
-    }
-
-    int64_t actualLen = dst - base;
-    RETURN_NOT_OK(compressedBuffer->Resize(actualLen));
+    ARROW_RETURN_IF(actualLength < 0, arrow::Status::Invalid("Writing compressed buffer out of bound."));
+    RETURN_NOT_OK(std::dynamic_pointer_cast<arrow::ResizableBuffer>(compressedBuffer)->Resize(actualLength));
 
     compressionTime.stop();
-    std::vector<std::shared_ptr<arrow::Buffer>> compressedBuffers;
-    compressedBuffers.push_back(std::move(compressedBuffer));
     auto payload = std::unique_ptr<BlockPayload>(
-        new BlockPayload(Type::kCompressed, numRows, numBuffers, std::move(compressedBuffers), isValidityBuffer));
+        new BlockPayload(Type::kCompressed, numRows, numBuffers, {compressedBuffer}, isValidityBuffer));
     payload->setCompressionTime(compressionTime.realTimeUsed());
     return payload;
   }
   return std::unique_ptr<BlockPayload>(
       new BlockPayload(payloadType, numRows, numBuffers, std::move(buffers), isValidityBuffer));
+}
+
+arrow::Result<std::unique_ptr<BlockPayload>>
+BlockPayload::compressBuffersForPool(
+    uint32_t numRows,
+    std::vector<std::shared_ptr<arrow::Buffer>> buffers,
+    const std::vector<bool>* isValidityBuffer,
+    arrow::util::Codec* codec) {
+  Timer compressionTime;
+  compressionTime.start();
+
+  auto* pool = arrow::default_memory_pool();
+  const uint32_t numBuffers = buffers.size();
+
+  auto maxLength = maxCompressedLength(buffers, codec);
+  std::shared_ptr<arrow::Buffer> compressedBuffer;
+  ARROW_ASSIGN_OR_RAISE(
+      compressedBuffer,
+      arrow::AllocateResizableBuffer(maxLength, pool));
+  auto* output = compressedBuffer->mutable_data();
+
+  int64_t actualLength = 0;
+  for (auto& buffer : buffers) {
+    auto availableLength = maxLength - actualLength;
+    ARROW_ASSIGN_OR_RAISE(
+        auto compressedSize,
+        compressBuffer(
+            std::move(buffer), output,
+            availableLength, codec));
+    output += compressedSize;
+    actualLength += compressedSize;
+  }
+
+  ARROW_RETURN_IF(
+      actualLength < 0,
+      arrow::Status::Invalid(
+          "Writing compressed buffer out of bound."));
+  RETURN_NOT_OK(
+      std::dynamic_pointer_cast<arrow::ResizableBuffer>(
+          compressedBuffer)
+          ->Resize(actualLength));
+
+  compressionTime.stop();
+  auto payload = std::unique_ptr<BlockPayload>(
+      new BlockPayload(
+          Type::kCompressed, numRows, numBuffers,
+          {compressedBuffer}, isValidityBuffer));
+  payload->setCompressionTime(
+      compressionTime.realTimeUsed());
+  return payload;
 }
 
 arrow::Status BlockPayload::serialize(arrow::io::OutputStream* outputStream) {
@@ -638,11 +549,9 @@ arrow::Result<std::unique_ptr<BlockPayload>>
 InMemoryPayload::toBlockPayload(
     Payload::Type payloadType,
     arrow::MemoryPool* pool,
-    arrow::util::Codec* codec,
-    int32_t compressionThreads,
-    CompressionThreadPool* threadPool) {
+    arrow::util::Codec* codec) {
   return BlockPayload::fromBuffers(
-      payloadType, numRows_, std::move(buffers_), isValidityBuffer_, pool, codec, compressionThreads, threadPool);
+      payloadType, numRows_, std::move(buffers_), isValidityBuffer_, pool, codec);
 }
 
 arrow::Status InMemoryPayload::serialize(arrow::io::OutputStream* outputStream) {

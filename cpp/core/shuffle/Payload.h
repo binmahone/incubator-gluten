@@ -22,7 +22,6 @@
 #include <arrow/memory_pool.h>
 #include <arrow/util/compression.h>
 
-#include "shuffle/CompressionThreadPool.h"
 #include "shuffle/Dictionary.h"
 #include "shuffle/Options.h"
 #include "shuffle/Utils.h"
@@ -81,9 +80,7 @@ class BlockPayload final : public Payload {
       std::vector<std::shared_ptr<arrow::Buffer>> buffers,
       const std::vector<bool>* isValidityBuffer,
       arrow::MemoryPool* pool,
-      arrow::util::Codec* codec,
-      int32_t compressionThreads = 1,
-      CompressionThreadPool* threadPool = nullptr);
+      arrow::util::Codec* codec);
 
   static arrow::Result<std::vector<std::shared_ptr<arrow::Buffer>>> deserialize(
       arrow::io::InputStream* inputStream,
@@ -117,6 +114,15 @@ class BlockPayload final : public Payload {
 
   static int64_t maxCompressedLength(
       const std::vector<std::shared_ptr<arrow::Buffer>>& buffers,
+      arrow::util::Codec* codec);
+
+  // Compress all buffers sequentially using the default memory pool.
+  // Designed to run on a background pool thread for async compression.
+  static arrow::Result<std::unique_ptr<BlockPayload>>
+  compressBuffersForPool(
+      uint32_t numRows,
+      std::vector<std::shared_ptr<arrow::Buffer>> buffers,
+      const std::vector<bool>* isValidityBuffer,
       arrow::util::Codec* codec);
 
   arrow::Status serialize(arrow::io::OutputStream* outputStream) override;
@@ -164,9 +170,7 @@ class InMemoryPayload final : public Payload {
   toBlockPayload(
       Payload::Type payloadType,
       arrow::MemoryPool* pool,
-      arrow::util::Codec* codec,
-      int32_t compressionThreads = 1,
-      CompressionThreadPool* threadPool = nullptr);
+      arrow::util::Codec* codec);
 
   arrow::Status copyBuffers(arrow::MemoryPool* pool);
 
@@ -181,6 +185,10 @@ class InMemoryPayload final : public Payload {
   std::shared_ptr<arrow::Schema> schema() const;
 
   arrow::Status createDictionaries(const std::shared_ptr<ShuffleDictionaryWriter>& dictionaryWriter);
+
+  std::vector<std::shared_ptr<arrow::Buffer>> takeBuffers() {
+    return std::move(buffers_);
+  }
 
  private:
   std::shared_ptr<arrow::Schema> schema_;
