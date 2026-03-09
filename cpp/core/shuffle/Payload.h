@@ -125,6 +125,30 @@ class BlockPayload final : public Payload {
       const std::vector<bool>* isValidityBuffer,
       arrow::util::Codec* codec);
 
+  // Two-phase async compression: phase 1 (main thread)
+  // pre-allocates output; phase 2 (worker thread)
+  // compresses each buffer individually.
+  struct PreparedCompression {
+    uint32_t numRows = 0;
+    uint32_t numBuffers = 0;
+    const std::vector<bool>* isValidityBuffer = nullptr;
+    std::vector<std::shared_ptr<arrow::Buffer>> buffers;
+    std::shared_ptr<arrow::ResizableBuffer> output;
+  };
+
+  static arrow::Result<PreparedCompression>
+  prepareCompression(
+      uint32_t numRows,
+      std::vector<std::shared_ptr<arrow::Buffer>> buffers,
+      const std::vector<bool>* isValidityBuffer,
+      arrow::MemoryPool* pool,
+      arrow::util::Codec* codec);
+
+  static arrow::Result<std::unique_ptr<BlockPayload>>
+  finishCompression(
+      PreparedCompression&& pc,
+      arrow::util::Codec* codec);
+
   arrow::Status serialize(arrow::io::OutputStream* outputStream) override;
 
   arrow::Result<std::shared_ptr<arrow::Buffer>> readBufferAt(uint32_t pos);

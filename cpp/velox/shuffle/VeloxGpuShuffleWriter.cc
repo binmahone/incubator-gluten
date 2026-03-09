@@ -21,18 +21,57 @@
 
 #include "velox/experimental/cudf/vector/CudfVector.h"
 #include "velox/experimental/cudf/exec/VeloxCudfInterop.h"
+#include "velox/experimental/cudf/exec/PinnedHostMemory.h"
 
 #include <cudf/binaryop.hpp>
 #include <cudf/column/column_factories.hpp>
 #include <cudf/interop.hpp>
+#include <cudf/null_mask.hpp>
 #include <cudf/partitioning.hpp>
 #include <cudf/scalar/scalar.hpp>
+#include <cudf/strings/strings_column_view.hpp>
 #include <cudf/types.hpp>
+#include <cudf/utilities/traits.hpp>
+#include <cuda_runtime.h>
 
 namespace gluten {
 
 using namespace facebook::velox;
 using CudfVector = facebook::velox::cudf_velox::CudfVector;
+using PinnedHostBuffer =
+    facebook::velox::cudf_velox::PinnedHostBuffer;
+
+namespace {
+
+// arrow::Buffer backed by PinnedHostBuffer for zero-copy D2H.
+// Pinned memory enables fast PCIe DMA. The PinnedHostBuffer
+// lifetime is tied to this arrow::Buffer via shared_ptr, so
+// downstream consumers (compression tasks) keep it alive.
+class PinnedArrowBuffer : public arrow::Buffer {
+ public:
+  explicit PinnedArrowBuffer(
+      std::shared_ptr<PinnedHostBuffer> pinned)
+      : arrow::Buffer(
+            pinned->data(),
+            static_cast<int64_t>(pinned->size())),
+        pinned_(std::move(pinned)) {}
+
+ private:
+  std::shared_ptr<PinnedHostBuffer> pinned_;
+};
+
+arrow::Status checkCuda(cudaError_t err, const char* msg) {
+  if (err != cudaSuccess) {
+    return arrow::Status::IOError(
+        msg, ": ", cudaGetErrorString(err));
+  }
+  return arrow::Status::OK();
+}
+
+#define RETURN_CUDA_ERROR(expr)          \
+  RETURN_NOT_OK(checkCuda((expr), #expr))
+
+} // namespace
 
 // Split bool bit to bytes.
 void VeloxGpuHashShuffleWriter::splitBoolValueType(const uint8_t* srcAddr, const std::vector<uint8_t*>& dstAddrs) {
@@ -229,28 +268,38 @@ arrow::Status VeloxGpuHashShuffleWriter::prePartitionedEvict(
 
 arrow::Status VeloxGpuHashShuffleWriter::gpuPartitionAndEvict(
     std::shared_ptr<CudfVector> cudfVec) {
-  facebook::velox::RowVectorPtr veloxRv;
   std::vector<cudf::size_type> offsets;
+  cudf::size_type totalRows = 0;
+  int numCols = 0;
 
-  // GPU-intensive section: partition on device and D2H transfer.
-  // Acquire the GPU concurrency semaphore so that concurrent shuffle tasks
-  // do not collectively exhaust GPU memory.
+  struct ColHost {
+    bool isString = false;
+    bool hasNulls = false;
+    int32_t elemSize = 0;
+    std::shared_ptr<PinnedArrowBuffer> dataBuf;
+    std::shared_ptr<PinnedArrowBuffer> nullBuf;
+    std::shared_ptr<PinnedArrowBuffer> strOffsetsBuf;
+    std::shared_ptr<PinnedArrowBuffer> strCharsBuf;
+  };
+  std::vector<ColHost> colHosts;
+
   {
     GpuLockGuard gpuLock;
 
     auto tableView = cudfVec->getTableView();
     auto stream = cudfVec->stream();
 
-    LOG(WARNING) << "gpuPartitionAndEvict: input rows=" << tableView.num_rows()
-                 << " cols=" << tableView.num_columns()
-                 << " numPartitions=" << numPartitions_
-                 << " partitioning=" << static_cast<int>(partitioning_);
+    LOG(WARNING)
+        << "gpuPartitionAndEvict: input rows="
+        << tableView.num_rows()
+        << " cols=" << tableView.num_columns()
+        << " numPartitions=" << numPartitions_;
 
     auto firstCol = tableView.column(0);
-
     std::vector<cudf::column_view> dataCols;
     dataCols.reserve(tableView.num_columns() - 1);
-    for (cudf::size_type i = 1; i < tableView.num_columns(); ++i) {
+    for (cudf::size_type i = 1;
+         i < tableView.num_columns(); ++i) {
       dataCols.push_back(tableView.column(i));
     }
     cudf::table_view dataTable(dataCols);
@@ -259,10 +308,10 @@ arrow::Status VeloxGpuHashShuffleWriter::gpuPartitionAndEvict(
     cudf::column_view pidColView;
     if (partitioning_ == Partitioning::kHash) {
       auto numPartScalar = cudf::numeric_scalar<int32_t>(
-          static_cast<int32_t>(numPartitions_), true, stream);
+          static_cast<int32_t>(numPartitions_),
+          true, stream);
       pidColOwned = cudf::binary_operation(
-          firstCol,
-          numPartScalar,
+          firstCol, numPartScalar,
           cudf::binary_operator::PYMOD,
           cudf::data_type{cudf::type_id::INT32},
           stream);
@@ -271,54 +320,211 @@ arrow::Status VeloxGpuHashShuffleWriter::gpuPartitionAndEvict(
       pidColView = firstCol;
     }
 
-    auto [partitionedTable, partOffsets] = cudf::partition(
-        dataTable, pidColView, static_cast<cudf::size_type>(numPartitions_), stream);
-    VELOX_CHECK_EQ(partOffsets.size(), numPartitions_ + 1);
+    auto [partitionedTable, partOffsets] =
+        cudf::partition(
+            dataTable, pidColView,
+            static_cast<cudf::size_type>(numPartitions_),
+            stream);
+    VELOX_CHECK_EQ(
+        partOffsets.size(), numPartitions_ + 1);
     offsets = std::move(partOffsets);
-
-    // Free the original input batch GPU memory now that cudf::partition()
-    // produced an independent copy. This roughly halves peak GPU usage.
     pidColOwned.reset();
     cudfVec.reset();
 
-    uint64_t totalEvicted = 0;
-    for (uint32_t i = 0; i < numPartitions_; ++i) {
-      totalEvicted += (offsets[i + 1] - offsets[i]);
+    totalRows = partitionedTable->num_rows();
+    numCols = partitionedTable->num_columns();
+    auto tv = partitionedTable->view();
+
+    LOG(WARNING)
+        << "gpuPartitionAndEvict: partitioned rows="
+        << totalRows << " dataCols=" << numCols;
+
+    colHosts.resize(numCols);
+
+    for (int c = 0; c < numCols; ++c) {
+      auto col = tv.column(c);
+      auto& ch = colHosts[c];
+      auto typeId = col.type().id();
+      ch.hasNulls = col.nullable();
+
+      if (ch.hasNulls) {
+        auto validitySize = static_cast<int64_t>(
+            cudf::bitmask_allocation_size_bytes(
+                totalRows));
+        auto pinned = std::make_shared<PinnedHostBuffer>(
+            validitySize);
+        RETURN_CUDA_ERROR(cudaMemcpyAsync(
+            pinned->data(),
+            col.null_mask(),
+            validitySize,
+            cudaMemcpyDeviceToHost,
+            stream.value()));
+        ch.nullBuf =
+            std::make_shared<PinnedArrowBuffer>(
+                std::move(pinned));
+      }
+
+      if (typeId == cudf::type_id::STRING) {
+        ch.isString = true;
+        auto scv = cudf::strings_column_view(col);
+        auto offsCol = scv.offsets();
+        VELOX_CHECK(
+            offsCol.type().id() == cudf::type_id::INT32,
+            "Only INT32 string offsets supported");
+
+        auto offsBytes = static_cast<int64_t>(
+            totalRows + 1) * sizeof(int32_t);
+        auto pinnedOffs =
+            std::make_shared<PinnedHostBuffer>(offsBytes);
+        RETURN_CUDA_ERROR(cudaMemcpyAsync(
+            pinnedOffs->data(),
+            offsCol.data<int32_t>(),
+            offsBytes,
+            cudaMemcpyDeviceToHost,
+            stream.value()));
+        ch.strOffsetsBuf =
+            std::make_shared<PinnedArrowBuffer>(
+                std::move(pinnedOffs));
+
+        auto charsSize = static_cast<int64_t>(
+            scv.chars_size(stream));
+        if (charsSize > 0) {
+          auto pinnedChars =
+              std::make_shared<PinnedHostBuffer>(
+                  charsSize);
+          RETURN_CUDA_ERROR(cudaMemcpyAsync(
+              pinnedChars->data(),
+              scv.chars_begin(stream),
+              charsSize,
+              cudaMemcpyDeviceToHost,
+              stream.value()));
+          ch.strCharsBuf =
+              std::make_shared<PinnedArrowBuffer>(
+                  std::move(pinnedChars));
+        }
+      } else {
+        ch.elemSize = static_cast<int32_t>(
+            cudf::size_of(col.type()));
+        auto dataBytes =
+            static_cast<int64_t>(totalRows) * ch.elemSize;
+        if (dataBytes > 0) {
+          auto pinned =
+              std::make_shared<PinnedHostBuffer>(
+                  dataBytes);
+          RETURN_CUDA_ERROR(cudaMemcpyAsync(
+              pinned->data(),
+              col.data<uint8_t>(),
+              dataBytes,
+              cudaMemcpyDeviceToHost,
+              stream.value()));
+          ch.dataBuf =
+              std::make_shared<PinnedArrowBuffer>(
+                  std::move(pinned));
+        }
+      }
     }
-    LOG(WARNING) << "gpuPartitionAndEvict: partitioned rows=" << partitionedTable->num_rows()
-                 << " dataCols=" << partitionedTable->num_columns()
-                 << " totalInOffsets=" << totalEvicted
-                 << " offsets[0]=" << offsets[0]
-                 << " offsets[last]=" << offsets[numPartitions_];
 
-    // D2H: convert the partitioned table to a Velox RowVector on host.
-    veloxRv = cudf_velox::with_arrow::toVeloxColumn(
-        partitionedTable->view(), veloxPool_.get(), std::string(""), stream);
-
-    // partitionedTable (GPU) is released when this scope exits.
+    RETURN_CUDA_ERROR(
+        cudaStreamSynchronize(stream.value()));
+    // partitionedTable (GPU) released here.
   }
-  // GpuLockGuard released here — all GPU work is done.
+  // GpuLockGuard released.
 
-  LOG(WARNING) << "gpuPartitionAndEvict: veloxRv rows=" << veloxRv->size()
-               << " children=" << veloxRv->childrenSize();
-
-  // CPU-side: extract buffers per partition directly from the full RowVector
-  // using offsets (avoids sliced-vector offset pitfalls and enables zero-copy).
+  // CPU-side: slice per-column host buffers per partition.
   uint64_t totalRowsEvicted = 0;
+
   for (uint32_t pid = 0; pid < numPartitions_; ++pid) {
-    auto start = static_cast<int64_t>(offsets[pid]);
-    auto numRows = static_cast<uint32_t>(offsets[pid + 1] - offsets[pid]);
-    if (numRows == 0) {
+    auto start = offsets[pid];
+    auto count = offsets[pid + 1] - offsets[pid];
+    if (count == 0) {
       continue;
     }
+    auto numRows = static_cast<uint32_t>(count);
 
     std::vector<std::shared_ptr<arrow::Buffer>> buffers;
-    RETURN_NOT_OK(extractBuffersFromRowVector(*veloxRv, start, numRows, buffers));
-    RETURN_NOT_OK(evictBuffers(pid, numRows, std::move(buffers), false));
+    buffers.reserve(numCols * 2);
+
+    for (int c = 0; c < numCols; ++c) {
+      auto& ch = colHosts[c];
+      auto arrowTypeId = arrowColumnTypes_[c]->id();
+      if (arrowTypeId == arrow::Type::NA) {
+        continue;
+      }
+
+      // Validity: copyBits (source bit offset may not
+      // be byte-aligned after cudf::partition).
+      if (ch.hasNulls) {
+        auto validityBytes =
+            arrow::bit_util::BytesForBits(numRows);
+        ARROW_ASSIGN_OR_RAISE(
+            auto vBuf,
+            arrow::AllocateBuffer(
+                validityBytes,
+                partitionBufferPool_.get()));
+        std::memset(
+            vBuf->mutable_data(), 0, validityBytes);
+        bits::copyBits(
+            reinterpret_cast<const uint64_t*>(
+                ch.nullBuf->data()),
+            start,
+            reinterpret_cast<uint64_t*>(
+                vBuf->mutable_data()),
+            0, numRows);
+        buffers.push_back(std::move(vBuf));
+      } else {
+        buffers.push_back(nullptr);
+      }
+
+      if (ch.isString) {
+        auto* hostOffs =
+            reinterpret_cast<const int32_t*>(
+                ch.strOffsetsBuf->data());
+        auto lenBytes =
+            static_cast<int64_t>(numRows) *
+            sizeof(uint32_t);
+        ARROW_ASSIGN_OR_RAISE(
+            auto lenBuf,
+            arrow::AllocateBuffer(
+                lenBytes,
+                partitionBufferPool_.get()));
+        auto* lengths = reinterpret_cast<uint32_t*>(
+            lenBuf->mutable_data());
+        for (uint32_t i = 0; i < numRows; ++i) {
+          lengths[i] = static_cast<uint32_t>(
+              hostOffs[start + i + 1] -
+              hostOffs[start + i]);
+        }
+        buffers.push_back(std::move(lenBuf));
+
+        auto charsStart = hostOffs[start];
+        auto charsEnd = hostOffs[start + numRows];
+        auto charsLen = charsEnd - charsStart;
+        if (charsLen > 0 && ch.strCharsBuf) {
+          buffers.push_back(arrow::SliceBuffer(
+              ch.strCharsBuf, charsStart, charsLen));
+        } else {
+          buffers.push_back(zeroLengthNullBuffer());
+        }
+      } else {
+        auto byteOffset = start * ch.elemSize;
+        auto sliceLen =
+            static_cast<int64_t>(numRows) * ch.elemSize;
+        if (sliceLen > 0 && ch.dataBuf) {
+          buffers.push_back(arrow::SliceBuffer(
+              ch.dataBuf, byteOffset, sliceLen));
+        } else {
+          buffers.push_back(zeroLengthNullBuffer());
+        }
+      }
+    }
+
+    RETURN_NOT_OK(evictBuffers(
+        pid, numRows, std::move(buffers), false));
     totalRowsEvicted += numRows;
   }
 
-  LOG(WARNING) << "gpuPartitionAndEvict: totalRowsEvicted=" << totalRowsEvicted;
+  LOG(WARNING) << "gpuPartitionAndEvict: "
+               << "totalRowsEvicted=" << totalRowsEvicted;
   return arrow::Status::OK();
 }
 

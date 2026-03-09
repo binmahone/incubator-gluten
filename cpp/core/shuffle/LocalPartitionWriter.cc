@@ -340,23 +340,27 @@ class LocalPartitionWriter::PayloadCache {
     bool shouldCompress = codec_ != nullptr && payload->numRows() >= compressionThreshold_;
 
     if (shouldCompress) {
+      // Two-phase async compression:
+      // Phase 1 (main thread): concat buffers + alloc output
+      // Phase 2 (worker thread): codec->Compress only
       auto numRows = payload->numRows();
       auto buffers = payload->takeBuffers();
       auto* isValBuf = payload->isValidityBuffer();
       auto* codec = codec_;
 
+      ARROW_ASSIGN_OR_RAISE(
+          auto pc,
+          BlockPayload::prepareCompression(
+              numRows, std::move(buffers),
+              isValBuf, pool_, codec));
+
       auto future =
           ShuffleCompressionPool::instance().submit(
-              [numRows,
-               buffers = std::move(buffers),
-               isValBuf,
-               codec]() mutable
+              [pc = std::move(pc), codec]() mutable
               -> CompressResult {
                 return BlockPayload::
-                    compressBuffersForPool(
-                        numRows,
-                        std::move(buffers),
-                        isValBuf, codec);
+                    finishCompression(
+                        std::move(pc), codec);
               });
       pendingFutures_[partitionId].push_back(
           std::move(future));
