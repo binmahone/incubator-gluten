@@ -106,6 +106,10 @@ class LocalPartitionWriter : public PartitionWriter {
 
   arrow::Status populateMetrics(ShuffleWriterMetrics* metrics);
 
+  // Register cached payloads in the catalog instead of
+  // merging them into a data file.
+  arrow::Status registerInCatalog();
+
   std::shared_ptr<LocalPartitionWriterOptions> options_;
   std::string dataFile_;
   std::vector<std::string> localDirs_;
@@ -129,5 +133,15 @@ class LocalPartitionWriter : public PartitionWriter {
   std::vector<int64_t> rawPartitionLengths_;
 
   int32_t lastEvictPid_{-1};
+
+  int32_t shuffleId_{-1};
+  int64_t mapId_{-1};
+
+ public:
+  void setShuffleIdAndMapId(
+      int32_t shuffleId, int64_t mapId) {
+    shuffleId_ = shuffleId;
+    mapId_ = mapId;
+  }
 };
 } // namespace gluten

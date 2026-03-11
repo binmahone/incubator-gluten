@@ -22,6 +22,7 @@
 #include <arrow/util/compression.h>
 #include <lz4.h>
 
+#include "shuffle/Dictionary.h"
 #include "shuffle/Options.h"
 #include "shuffle/Utils.h"
 #include "utils/Exception.h"
@@ -387,6 +388,68 @@ BlockPayload::finishCompression(
   payload->setCompressionTime(
       compressionTime.realTimeUsed());
   return payload;
+}
+
+// Wire format header size:
+// 1 (BlockType) + 1 (PayloadType) + 4 (numRows) + 4 (numBuffers)
+static constexpr int64_t kWireHeaderSize = 10;
+
+arrow::Result<BlockPayload::PreparedCompression>
+BlockPayload::prepareWireFormat(
+    uint32_t numRows,
+    std::vector<std::shared_ptr<arrow::Buffer>> buffers,
+    const std::vector<bool>* isValidityBuffer,
+    arrow::MemoryPool* pool,
+    arrow::util::Codec* codec) {
+  PreparedCompression pc;
+  pc.numRows = numRows;
+  pc.numBuffers = buffers.size();
+  pc.isValidityBuffer = isValidityBuffer;
+  pc.buffers = std::move(buffers);
+
+  auto maxLen =
+      maxCompressedLength(pc.buffers, codec);
+  // Extra space for the wire header at the front.
+  ARROW_ASSIGN_OR_RAISE(
+      pc.output,
+      arrow::AllocateResizableBuffer(
+          kWireHeaderSize + maxLen, pool));
+  return pc;
+}
+
+arrow::Result<std::shared_ptr<arrow::Buffer>>
+BlockPayload::finishWireFormat(
+    PreparedCompression&& pc,
+    arrow::util::Codec* codec) {
+  // Compress data starting after the header.
+  auto* out = pc.output->mutable_data() + kWireHeaderSize;
+  int64_t totalLen = 0;
+  int64_t capacity = pc.output->size() - kWireHeaderSize;
+
+  for (auto& buf : pc.buffers) {
+    ARROW_ASSIGN_OR_RAISE(
+        auto written,
+        compressBuffer(
+            buf, out, capacity - totalLen, codec));
+    out += written;
+    totalLen += written;
+    buf.reset();
+  }
+  pc.buffers.clear();
+
+  // Fill the header at the beginning.
+  auto* hdr = pc.output->mutable_data();
+  hdr[0] = static_cast<uint8_t>(
+      BlockType::kPlainPayload);
+  hdr[1] = static_cast<uint8_t>(
+      Payload::kCompressed);
+  memcpy(hdr + 2, &pc.numRows, sizeof(uint32_t));
+  memcpy(hdr + 6, &pc.numBuffers, sizeof(uint32_t));
+
+  RETURN_NOT_OK(
+      pc.output->Resize(kWireHeaderSize + totalLen));
+  return std::shared_ptr<arrow::Buffer>(
+      std::move(pc.output));
 }
 
 arrow::Status BlockPayload::serialize(arrow::io::OutputStream* outputStream) {

@@ -149,11 +149,39 @@ class BlockPayload final : public Payload {
       PreparedCompression&& pc,
       arrow::util::Codec* codec);
 
+  // Compress directly into wire format:
+  // [BlockType][PayloadType][numRows][numBuffers][data]
+  // Allocated on the given pool (typically default pool).
+  // Phase 1: pre-allocate with header space.
+  static arrow::Result<PreparedCompression>
+  prepareWireFormat(
+      uint32_t numRows,
+      std::vector<std::shared_ptr<arrow::Buffer>> buffers,
+      const std::vector<bool>* isValidityBuffer,
+      arrow::MemoryPool* pool,
+      arrow::util::Codec* codec);
+
+  // Phase 2: compress and fill header. Returns the
+  // complete wire-format buffer (not a BlockPayload).
+  static arrow::Result<std::shared_ptr<arrow::Buffer>>
+  finishWireFormat(
+      PreparedCompression&& pc,
+      arrow::util::Codec* codec);
+
   arrow::Status serialize(arrow::io::OutputStream* outputStream) override;
 
   arrow::Result<std::shared_ptr<arrow::Buffer>> readBufferAt(uint32_t pos);
 
   int64_t rawSize() override;
+
+  uint32_t numBuffers() const {
+    return numBuffers_;
+  }
+
+  const std::vector<std::shared_ptr<arrow::Buffer>>&
+  buffers() const {
+    return buffers_;
+  }
 
  private:
   BlockPayload(
